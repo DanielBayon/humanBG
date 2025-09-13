@@ -28,7 +28,7 @@ const N8N_REPORT_WEBHOOK_URL = process.env.N8N_REPORT_WEBHOOK_URL;
 const N8N_SUPERVISOR_WEBHOOK_URL = process.env.N8N_SUPERVISOR_WEBHOOK_URL;
 
 if (!SERVICE_ACCOUNT_JSON || !GOOGLE_APPLICATION_CREDENTIALS_JSON || !GOOGLE_PROJECT_ID) {
-  console.error("CRITICAL: Faltan credenciales de Firebase o Google Cloud en las variables de entorno.");
+  console.error("CRITICAL: Faltan credenciales de Firebase o Google Cloud en las variables de entorno. ");
   process.exit(1);
 }
 

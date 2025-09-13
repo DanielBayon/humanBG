@@ -31,7 +31,7 @@ if (GOOGLE_CREDS_JSON_STRING) {
 if (GOOGLE_PROJECT_ID) {
     console.log(`✔️ GOOGLE_PROJECT_ID: Encontrado (valor: ${GOOGLE_PROJECT_ID}).`);
 } else {
-    console.error("❌ CRITICAL: La variable GOOGLE_PROJECT_ID no existe o está vacía.");
+    console.error("❌ CRITICAL: La variable GOOGLE_PROJECT_ID no existe o está vacía .");
     hasError = true;
 }
 

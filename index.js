@@ -32,20 +32,29 @@ if (!SERVICE_ACCOUNT_JSON || !GOOGLE_APPLICATION_CREDENTIALS_JSON || !GOOGLE_PRO
   process.exit(1);
 }
 
-/*────────────────── INICIALIZACIÓN DE SERVICIOS ──────────────────*/
-// Firebase Admin (sin cambios)
-const firebaseServiceAccount = JSON.parse(SERVICE_ACCOUNT_JSON);
+
+// Función de ayuda para corregir el formato de la clave privada
+function fixPrivateKeyFormat(jsonString) {
+  if (!jsonString) return null;
+  const keyObject = JSON.parse(jsonString);
+  if (keyObject.private_key) {
+    keyObject.private_key = keyObject.private_key.replace(/\\n/g, '\n');
+  }
+  return keyObject;
+}
+
+// Firebase Admin (¡MODIFICADO!)
+const firebaseServiceAccount = fixPrivateKeyFormat(SERVICE_ACCOUNT_JSON);
 admin.initializeApp({ credential: admin.credential.cert(firebaseServiceAccount) });
 const adminDb = admin.firestore();
 
-// Google Cloud Clients (¡NUEVO!)
-const speechClient = new SpeechClient({
-    credentials: JSON.parse(GOOGLE_APPLICATION_CREDENTIALS_JSON)
-});
+// Google Cloud Clients (¡MODIFICADO!)
+const googleCredentials = fixPrivateKeyFormat(GOOGLE_APPLICATION_CREDENTIALS_JSON);
+const speechClient = new SpeechClient({ credentials: googleCredentials });
 const vertexAI = new VertexAI({
     project: GOOGLE_PROJECT_ID,
     location: GOOGLE_LOCATION,
-    credentials: JSON.parse(GOOGLE_APPLICATION_CREDENTIALS_JSON)
+    credentials: googleCredentials
 });
 
 // Modelo Gemini Flash

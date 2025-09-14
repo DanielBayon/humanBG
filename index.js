@@ -5,71 +5,61 @@ import dotenv from "dotenv";
 import cors from "cors";
 import admin from "firebase-admin";
 import { SpeechClient } from "@google-cloud/speech";
-import { VertexAI, HarmCategory, HarmBlockThreshold } from "@google-cloud/vertexai";
+import { VertexAI } from "@google-cloud/vertexai";
+import fs from 'fs'; // Módulo de Node.js para manejar archivos
+import path from 'path'; // Módulo para manejar rutas de archivos
+import os from 'os'; // Módulo para encontrar el directorio temporal del sistema
+
+// --- CONFIGURACIÓN DE CREDENCIALES (MÉTODO DOCUMENTADO Y ROBUSTO) ---
+// Esto se ejecuta ANTES que cualquier otra cosa.
+try {
+    console.log("Configurando credenciales de Google Cloud de forma programática...");
+    const jsonString = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+    if (!jsonString) {
+        throw new Error("La variable de entorno GOOGLE_APPLICATION_CREDENTIALS_JSON no está definida.");
+    }
+    
+    // Crear una ruta de archivo segura en el directorio temporal del sistema
+    const credentialsPath = path.join(os.tmpdir(), 'gcloud-credentials.json');
+
+    // Escribir el contenido del JSON en el archivo
+    fs.writeFileSync(credentialsPath, jsonString.replace(/\\n/g, '\n'));
+
+    // Establecer la variable de entorno que esperan los SDK de Google
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
+
+    console.log(`✔️ Credenciales escritas en ${credentialsPath} y variable de entorno establecida.`);
+
+} catch (error) {
+    console.error("CRITICAL: Fallo fatal al configurar las credenciales.", error);
+    process.exit(1);
+}
+// --- FIN DE LA CONFIGURACIÓN DE CREDENCIALES ---
+
 
 dotenv.config();
 const app = express();
-app.use(cors());
+app.use(cors({ origin: '*' }));
 expressWs(app);
 
-/*────────────────────── VARIABLES DE ENTORNO ───────────────────────*/
-const FIREBASE_JSON_STRING = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
-const GOOGLE_JSON_STRING = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
-const GOOGLE_PROJECT_ID = process.env.GOOGLE_PROJECT_ID;
-const GOOGLE_LOCATION = process.env.GOOGLE_LOCATION || "us-central1";
-
-if (!FIREBASE_JSON_STRING || !GOOGLE_JSON_STRING || !GOOGLE_PROJECT_ID) {
-  console.error("CRITICAL: Faltan FIREBASE_SERVICE_ACCOUNT_KEY, GOOGLE_APPLICATION_CREDENTIALS_JSON, o GOOGLE_PROJECT_ID.");
-  process.exit(1);
-}
-
-let adminDb, speechClient, vertexAI, geminiModel;
+/*────────────────────── INICIALIZACIÓN DE SERVICIOS ───────────────────────*/
+// Ahora que el entorno está preparado, los SDK se inicializan sin argumentos.
+let adminDb, speechClient, vertexAI, geminiModel, appCheck;
 
 try {
-    // Función de ayuda robusta para parsear y corregir credenciales
-    const fixAndParseCredentials = (jsonString, serviceName) => {
-        if (!jsonString || jsonString.length < 10) {
-            throw new Error(`La cadena JSON para ${serviceName} está vacía o es inválida.`);
-        }
-        try {
-            const correctedString = jsonString.replace(/\\n/g, '\n');
-            return JSON.parse(correctedString);
-        } catch (e) {
-            throw new Error(`Error al parsear el JSON para ${serviceName}: ${e.message}`);
-        }
-    };
+    console.log("Inicializando servicios con credenciales por defecto del entorno...");
 
-    // --- INICIALIZACIÓN EXPLÍCITA DE CADA SERVICIO ---
+    const firebaseApp = admin.initializeApp();
+    adminDb = firebaseApp.firestore();
+    appCheck = firebaseApp.appCheck();
+    console.log("✔️ Firebase Admin SDK y AppCheck inicializados.");
 
-    // 1. Firebase Admin SDK
-    console.log("Inicializando Firebase Admin SDK...");
-    const firebaseCreds = fixAndParseCredentials(FIREBASE_JSON_STRING, "Firebase");
-    admin.initializeApp({ credential: admin.credential.cert(firebaseCreds) });
-    adminDb = admin.firestore();
-    console.log("✔️ Firebase Admin SDK inicializado.");
+    speechClient = new SpeechClient();
+    console.log("✔️ SpeechClient inicializado.");
 
-    // 2. Google Cloud SDKs (Speech y Vertex)
-    console.log("Inicializando Google Cloud SDKs...");
-    const googleCreds = fixAndParseCredentials(GOOGLE_JSON_STRING, "Google Cloud");
-    
-    // Se pasa explícitamente projectId Y credentials para anular cualquier búsqueda por defecto.
-    const clientOptions = {
-        projectId: GOOGLE_PROJECT_ID,
-        credentials: googleCreds
-    };
-
-    speechClient = new SpeechClient(clientOptions);
-    console.log("✔️ SpeechClient inicializado explícitamente.");
-
-    vertexAI = new VertexAI({
-        project: GOOGLE_PROJECT_ID,
-        location: GOOGLE_LOCATION,
-        credentials: googleCreds
-    });
-    console.log("✔️ VertexAI inicializado explícitamente.");
-
+    vertexAI = new VertexAI({ project: process.env.GOOGLE_PROJECT_ID, location: process.env.GOOGLE_LOCATION || "us-central1" });
     geminiModel = vertexAI.getGenerativeModel({ model: 'gemini-1.5-flash-001' });
-    console.log("✔️ Modelo Gemini cargado.");
+    console.log("✔️ VertexAI (Gemini) inicializado.");
 
     console.log("✅ Todos los servicios se inicializaron correctamente.");
 
@@ -79,41 +69,21 @@ try {
 }
 
 /*────────────────── SERVIDOR WEBSOCKET (/realtime-ws) ──────────────────*/
-// El código del WebSocket de aquí en adelante no necesita cambios.
-// Pega el que ya tenías. Te lo incluyo completo por seguridad.
 app.ws("/realtime-ws", (clientWs, req) => {
     console.log("[CLIENT CONNECTED]");
-
-    let recognizeStream = null;
-    let geminiChat = null;
-    let conversationId = null;
-    let fullConversationTranscript = "";
-    let currentBotId = null;
+    let recognizeStream = null, geminiChat = null;
 
     const safeSend = (data) => {
-        if (clientWs.readyState === 1) { // WebSocket.OPEN
-            clientWs.send(JSON.stringify(data));
-        }
+        if (clientWs.readyState === 1) clientWs.send(JSON.stringify(data));
     };
 
     const startGoogleSpeechStream = (languageCode = 'es-ES') => {
-        if (recognizeStream) {
-            recognizeStream.end();
-        }
+        if (recognizeStream) recognizeStream.end();
         recognizeStream = speechClient.streamingRecognize({
-            config: {
-                encoding: 'LINEAR16',
-                sampleRateHertz: 24000,
-                languageCode: languageCode,
-                model: 'telephony',
-                enableAutomaticPunctuation: true,
-            },
+            config: { encoding: 'LINEAR16', sampleRateHertz: 24000, languageCode, model: 'telephony', enableAutomaticPunctuation: true },
             interimResults: true,
-        }).on('error', (err) => {
-            console.error('[GOOGLE STT ERROR]', err);
-            safeSend({ type: 'error', message: 'Error en la transcripción.' });
-        }).on('data', onSpeechData);
-        console.log(`[GOOGLE STT] Stream iniciado en ${languageCode}.`);
+        }).on('error', console.error).on('data', onSpeechData);
+        console.log(`[STT] Stream iniciado en ${languageCode}.`);
     };
 
     const onSpeechData = async (data) => {
@@ -121,8 +91,6 @@ app.ws("/realtime-ws", (clientWs, req) => {
         const isFinal = data.results[0]?.isFinal || false;
         if (transcript) safeSend({ type: 'transcript', text: transcript, isFinal });
         if (isFinal && transcript.trim()) {
-            console.log(`[TRANSCRIPT FINAL] Usuario: "${transcript.trim()}"`);
-            fullConversationTranscript += `\nUSUARIO: ${transcript.trim()}`;
             await getGeminiResponse(transcript.trim());
         }
     };
@@ -136,13 +104,10 @@ app.ws("/realtime-ws", (clientWs, req) => {
                 fullResponseText += item.candidates?.[0].content?.parts.map(p => p.text).join("") || "";
             }
             if (fullResponseText.trim()) {
-                console.log(`[GEMINI RESPONSE] Asistente: "${fullResponseText.trim()}"`);
-                fullConversationTranscript += `\nASISTENTE: ${fullResponseText.trim()}`;
                 safeSend({ type: 'assistant_final', text: fullResponseText.trim() });
             }
         } catch (error) {
             console.error('[GEMINI API ERROR]', error.message);
-            // El error que veías en el frontend venía de aquí.
             safeSend({ type: 'error', message: `Error en la API de Gemini: ${error.message}` });
         }
     };
@@ -155,30 +120,25 @@ app.ws("/realtime-ws", (clientWs, req) => {
             switch (msg.type) {
                 case 'start_conversation':
                     try {
-                        await admin.appCheck().verifyToken(msg.appCheckToken);
-                        currentBotId = msg.botId;
-                        const botSnap = await adminDb.collection("InteracBotGPT").doc(currentBotId).get();
+                        await appCheck.verifyToken(msg.appCheckToken);
+                        const botSnap = await adminDb.collection("InteracBotGPT").doc(msg.botId).get();
                         if (!botSnap.exists()) throw new Error("Bot no encontrado");
                         const botData = botSnap.data();
                         
                         startGoogleSpeechStream(botData.language?.toLowerCase() === 'en' ? 'en-US' : 'es-ES');
                         const systemPrompt = `Simula que eres ${botData.Variable1 || 'un asistente virtual'} y responde como crees que lo haría… ${botData.Variable5 ? `En la primera interacción, tu primera frase debe ser exactamente: "${botData.Variable5}".` : ''} ${botData.Variable2 || ''}`;
                         geminiChat = geminiModel.startChat({ systemInstruction: { role: "system", parts: [{ text: systemPrompt }] } });
-
-                        await adminDb.collection("Conversations").add({ RobotId: currentBotId, StartTime: admin.firestore.Timestamp.now() });
+                        
                         safeSend({ type: 'info', message: 'Backend conectado y listo.' });
                         await getGeminiResponse("");
                     } catch (e) {
-                        console.error("[START_CONV ERROR]", e.message);
+                        console.error("[START_CONV ERROR]", e);
                         safeSend({ type: 'error', message: e.message });
                     }
                     break;
                 case 'conversation.item.create':
                     if (msg.item?.content?.[0]?.type === "input_text") {
-                        const userText = msg.item.content[0].text;
-                        console.log(`[TEXTO] Usuario: "${userText}"`);
-                        fullConversationTranscript += `\nUSUARIO (texto): ${userText}`;
-                        await getGeminiResponse(userText);
+                        await getGeminiResponse(msg.item.content[0].text);
                     }
                     break;
             }

@@ -6,58 +6,79 @@ import cors from "cors";
 import admin from "firebase-admin";
 import { SpeechClient } from "@google-cloud/speech";
 import { VertexAI } from "@google-cloud/vertexai";
-import fs from 'fs'; // Módulo de Node.js para manejar archivos
-import path from 'path'; // Módulo para manejar rutas de archivos
-import os from 'os'; // Módulo para encontrar el directorio temporal del sistema
-
-// --- CONFIGURACIÓN DE CREDENCIALES (MÉTODO DOCUMENTADO Y ROBUSTO) ---
-// Esto se ejecuta ANTES que cualquier otra cosa.
-try {
-    console.log("Configurando credenciales de Google Cloud de forma programática...");
-    const jsonString = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
-    if (!jsonString) {
-        throw new Error("La variable de entorno GOOGLE_APPLICATION_CREDENTIALS_JSON no está definida.");
-    }
-    
-    // Crear una ruta de archivo segura en el directorio temporal del sistema
-    const credentialsPath = path.join(os.tmpdir(), 'gcloud-credentials.json');
-
-    // Escribir el contenido del JSON en el archivo
-    fs.writeFileSync(credentialsPath, jsonString.replace(/\\n/g, '\n'));
-
-    // Establecer la variable de entorno que esperan los SDK de Google
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
-
-    console.log(`✔️ Credenciales escritas en ${credentialsPath} y variable de entorno establecida.`);
-
-} catch (error) {
-    console.error("CRITICAL: Fallo fatal al configurar las credenciales.", error);
-    process.exit(1);
-}
-// --- FIN DE LA CONFIGURACIÓN DE CREDENCIALES ---
-
 
 dotenv.config();
 const app = express();
 app.use(cors({ origin: '*' }));
 expressWs(app);
 
-/*────────────────────── INICIALIZACIÓN DE SERVICIOS ───────────────────────*/
-// Ahora que el entorno está preparado, los SDK se inicializan sin argumentos.
+/*────────────────────── INICIALIZACIÓN DE SERVICIOS (VERSIÓN DEFINITIVA Y CORRECTA) ───────────────────────*/
 let adminDb, speechClient, vertexAI, geminiModel, appCheck;
 
 try {
-    console.log("Inicializando servicios con credenciales por defecto del entorno...");
+    console.log("Iniciando inicialización de servicios...");
 
-    const firebaseApp = admin.initializeApp();
+    const {
+        FIREBASE_SERVICE_ACCOUNT_KEY,
+        GOOGLE_APPLICATION_CREDENTIALS_JSON,
+        GOOGLE_PROJECT_ID,
+        GOOGLE_LOCATION = "us-central1"
+    } = process.env;
+
+    if (!FIREBASE_SERVICE_ACCOUNT_KEY || !GOOGLE_APPLICATION_CREDENTIALS_JSON || !GOOGLE_PROJECT_ID) {
+        throw new Error("Faltan una o más variables de entorno críticas.");
+    }
+
+    /**
+     * Función definitiva para procesar credenciales JSON desde variables de entorno.
+     * 1. Prepara el string para que sea un JSON sintácticamente válido (escapa newlines).
+     * 2. Parsea el JSON.
+     * 3. Restaura los newlines en la clave privada para que sea criptográficamente válida.
+     * @param {string} jsonString - El contenido de la variable de entorno.
+     * @param {string} serviceName - Nombre del servicio para logging de errores.
+     * @returns {object} El objeto de credenciales listo para ser usado.
+     */
+    const fixAndParseCredentials = (jsonString, serviceName) => {
+        try {
+            // Paso 1: Reemplazar saltos de línea literales por su secuencia de escape "\\n"
+            // para que la cadena completa sea un JSON válido.
+            const validJsonString = jsonString.replace(/\n/g, "\\n");
+            
+            // Paso 2: Parsear el string que ahora es sintácticamente correcto.
+            const credentialsObject = JSON.parse(validJsonString);
+            
+            // Paso 3: Dentro del objeto, restaurar los saltos de línea en el campo private_key
+            // para que las librerías de autenticación puedan usar la clave PEM.
+            if (credentialsObject.private_key) {
+                credentialsObject.private_key = credentialsObject.private_key.replace(/\\n/g, '\n');
+            }
+            
+            return credentialsObject;
+        } catch (e) {
+            console.error(`Error de sintaxis en el JSON para ${serviceName}. Verifica el contenido de la variable de entorno.`);
+            throw new Error(`Error al procesar las credenciales para ${serviceName}: ${e.message}`);
+        }
+    };
+
+    // 1. Inicializar Firebase con SUS credenciales
+    console.log("Procesando credenciales de Firebase...");
+    const firebaseCreds = fixAndParseCredentials(FIREBASE_SERVICE_ACCOUNT_KEY, "Firebase");
+    const firebaseApp = admin.initializeApp({
+        credential: admin.credential.cert(firebaseCreds)
+    });
     adminDb = firebaseApp.firestore();
     appCheck = firebaseApp.appCheck();
     console.log("✔️ Firebase Admin SDK y AppCheck inicializados.");
 
-    speechClient = new SpeechClient();
+    // 2. Inicializar Google Cloud Services con SUS credenciales
+    console.log("Procesando credenciales de Google Cloud...");
+    const googleCreds = fixAndParseCredentials(GOOGLE_APPLICATION_CREDENTIALS_JSON, "Google Cloud");
+    const clientOptions = { projectId: GOOGLE_PROJECT_ID, credentials: googleCreds };
+
+    speechClient = new SpeechClient(clientOptions);
     console.log("✔️ SpeechClient inicializado.");
 
-    vertexAI = new VertexAI({ project: process.env.GOOGLE_PROJECT_ID, location: process.env.GOOGLE_LOCATION || "us-central1" });
+    vertexAI = new VertexAI({ project: GOOGLE_PROJECT_ID, location: GOOGLE_LOCATION, credentials: googleCreds });
     geminiModel = vertexAI.getGenerativeModel({ model: 'gemini-1.5-flash-001' });
     console.log("✔️ VertexAI (Gemini) inicializado.");
 
@@ -73,9 +94,7 @@ app.ws("/realtime-ws", (clientWs, req) => {
     console.log("[CLIENT CONNECTED]");
     let recognizeStream = null, geminiChat = null;
 
-    const safeSend = (data) => {
-        if (clientWs.readyState === 1) clientWs.send(JSON.stringify(data));
-    };
+    const safeSend = (data) => { if (clientWs.readyState === 1) clientWs.send(JSON.stringify(data)); };
 
     const startGoogleSpeechStream = (languageCode = 'es-ES') => {
         if (recognizeStream) recognizeStream.end();
@@ -90,9 +109,7 @@ app.ws("/realtime-ws", (clientWs, req) => {
         const transcript = data.results[0]?.alternatives[0]?.transcript || "";
         const isFinal = data.results[0]?.isFinal || false;
         if (transcript) safeSend({ type: 'transcript', text: transcript, isFinal });
-        if (isFinal && transcript.trim()) {
-            await getGeminiResponse(transcript.trim());
-        }
+        if (isFinal && transcript.trim()) await getGeminiResponse(transcript.trim());
     };
 
     const getGeminiResponse = async (userText) => {
@@ -103,9 +120,7 @@ app.ws("/realtime-ws", (clientWs, req) => {
             for await (const item of result.stream) {
                 fullResponseText += item.candidates?.[0].content?.parts.map(p => p.text).join("") || "";
             }
-            if (fullResponseText.trim()) {
-                safeSend({ type: 'assistant_final', text: fullResponseText.trim() });
-            }
+            if (fullResponseText.trim()) safeSend({ type: 'assistant_final', text: fullResponseText.trim() });
         } catch (error) {
             console.error('[GEMINI API ERROR]', error.message);
             safeSend({ type: 'error', message: `Error en la API de Gemini: ${error.message}` });
@@ -145,10 +160,7 @@ app.ws("/realtime-ws", (clientWs, req) => {
         }
     });
 
-    clientWs.on('close', () => {
-        if (recognizeStream) recognizeStream.end();
-        console.log('[CLIENT DISCONNECTED]');
-    });
+    clientWs.on('close', () => { if (recognizeStream) recognizeStream.end(); console.log('[CLIENT DISCONNECTED]'); });
 });
 
 /*────────────────── ENDPOINTS HTTP Y ARRANQUE ──────────────────*/

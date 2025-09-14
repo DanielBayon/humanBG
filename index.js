@@ -90,6 +90,7 @@ try {
 }
 
 /*────────────────── SERVIDOR WEBSOCKET (/realtime-ws) ──────────────────*/
+/*────────────────── SERVIDOR WEBSOCKET (/realtime-ws) ──────────────────*/
 app.ws("/realtime-ws", (clientWs, req) => {
     console.log("[CLIENT CONNECTED]");
     let recognizeStream = null, geminiChat = null;
@@ -137,7 +138,14 @@ app.ws("/realtime-ws", (clientWs, req) => {
                     try {
                         await appCheck.verifyToken(msg.appCheckToken);
                         const botSnap = await adminDb.collection("InteracBotGPT").doc(msg.botId).get();
-                        if (!botSnap.exists()) throw new Error("Bot no encontrado");
+                        
+                        // --- ¡CORRECCIÓN DEFINITIVA AQUÍ! ---
+                        // Se han quitado los paréntesis de .exists()
+                        if (!botSnap.exists) {
+                            throw new Error("Bot no encontrado");
+                        }
+                        // --- FIN DE LA CORRECCIÓN ---
+
                         const botData = botSnap.data();
                         
                         startGoogleSpeechStream(botData.language?.toLowerCase() === 'en' ? 'en-US' : 'es-ES');

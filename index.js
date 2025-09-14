@@ -10,12 +10,11 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-/*───────────────────────── CREDENCIALES GCP ─────────────────────────*/
+/*──────────────────── CREDENCIALES GOOGLE CLOUD ───────────────────*/
 try {
   console.log("Configurando credenciales de Google Cloud de forma programática...");
   const jsonString = process.env.GOOGLE_CREDENTIALS_JSON;
   if (!jsonString) throw new Error("La variable de entorno GOOGLE_CREDENTIALS_JSON no está definida.");
-
   const credentialsPath = path.join(os.tmpdir(), "gcloud-credentials.json");
   fs.writeFileSync(credentialsPath, jsonString);
   process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
@@ -26,13 +25,11 @@ try {
 }
 
 dotenv.config();
-
-/*───────────────────────── APP ─────────────────────────*/
 const app = express();
 app.use(cors({ origin: "*" }));
 expressWs(app);
 
-/*────────────────────── INICIALIZACIÓN DE SERVICIOS ───────────────────────*/
+/*──────────────────── INICIALIZACIÓN DE SERVICIOS ───────────────────*/
 let adminDb, speechClient, vertexAI, geminiModel, appCheck;
 
 try {
@@ -40,7 +37,7 @@ try {
 
   const firebaseApp = admin.initializeApp();
   adminDb = firebaseApp.firestore();
-  appCheck = firebaseApp.appCheck?.(); // opcional según versión
+  appCheck = firebaseApp.appCheck();
   console.log("✔️ Firebase Admin SDK y AppCheck inicializados.");
 
   speechClient = new SpeechClient();
@@ -59,205 +56,189 @@ try {
   process.exit(1);
 }
 
-/*────────────────── SERVIDOR WEBSOCKET (/realtime-ws) ──────────────────*/
-app.ws("/realtime-ws", (clientWs, req) => {
+/*────────────────────────── HELPERS WS / STT ──────────────────────────*/
+const WS_OPEN = 1;
+const safeSend = (ws, data) => {
+  try { if (ws.readyState === WS_OPEN) ws.send(JSON.stringify(data)); } catch (_) {}
+};
+const normalizeLang = (lang) => {
+  if (!lang) return "es-ES";
+  const s = String(lang).toLowerCase();
+  if (s.startsWith("en")) return "en-US";
+  if (s.startsWith("es")) return "es-ES";
+  return lang;
+};
+
+/*────────────────── WEBSOCKET /realtime-ws ──────────────────*/
+app.ws("/realtime-ws", (clientWs) => {
   console.log("[CLIENT CONNECTED]");
-
   let recognizeStream = null;
+  let sttLanguageCode = "es-ES";
   let geminiChat = null;
+  let lastFinalNorm = "";
 
-  // Estado de STT por conexión
-  let currentLanguage = "es-ES";
-  let lastPartial = "";
-  let lastFinal = "";
+  const sttIsActive = () =>
+    recognizeStream && !recognizeStream.writableEnded && !recognizeStream.destroyed;
 
-  const safeSend = (data) => {
-    try {
-      if (clientWs.readyState === 1) clientWs.send(JSON.stringify(data));
-    } catch (_) {}
-  };
-
-  const stopGoogleSpeechStream = () => {
+  const endStt = (reason = "normal") => {
     if (recognizeStream) {
-      try {
-        recognizeStream.end();
-      } catch (_) {}
+      try { recognizeStream.end(); } catch (_) {}
       recognizeStream = null;
-      lastPartial = "";
-      console.log("[STT] Stream parado.");
     }
+    console.log(`[STT] Stream finalizado (${reason}).`);
   };
 
-  const startGoogleSpeechStream = (languageCode = currentLanguage) => {
-    stopGoogleSpeechStream(); // aseguramos reinicio limpio
-    currentLanguage = languageCode || currentLanguage;
+  const startSttStream = (lang = "es-ES") => {
+    sttLanguageCode = normalizeLang(lang);
 
-    // Config V1 afinada a micro “normal”: 24 kHz + enhanced "video"
+    // ► Modelo recomendado para español y habla de longitud variable
+    //    (interims en vivo + cierres controlados por el cliente).
     const request = {
       config: {
         encoding: "LINEAR16",
         sampleRateHertz: 24000,
-        languageCode: currentLanguage,
-        useEnhanced: true,
-        model: "video",
+        languageCode: sttLanguageCode,
+        model: "latest_long",                 // en lugar de 'video' / 'telephony'
         enableAutomaticPunctuation: true,
-        enableSpokenPunctuation: { value: true },
-        enableSpokenEmojis: { value: false },
         maxAlternatives: 1,
       },
-      interimResults: true, // queremos interim para pintar en UI, no para historial
-      // singleUtterance: false, // (doc antigua; no necesario aquí)
+      interimResults: true,                   // interims para latencia mínima
+      // singleUtterance se omite aquí: nosotros cerramos en audio.stop
     };
 
-    lastPartial = "";
-    lastFinal = "";
+    endStt("restart"); // por si algún stream previo quedó abierto
 
     recognizeStream = speechClient
       .streamingRecognize(request)
       .on("error", (err) => {
-        console.error("[STT ERROR]", err);
-        safeSend({ type: "error", message: `STT error: ${err.message}` });
+        console.error("[STT error]", err?.message || err);
+        safeSend(clientWs, { type: "error", message: `STT error: ${err.message || err}` });
+        endStt("error");
       })
       .on("data", onSpeechData)
       .on("end", () => {
-        console.log("[STT] Stream ended.");
+        console.log("[STT] 'end' recibido.");
+        endStt("end_event");
       });
 
-    console.log(`[STT] Stream iniciado en ${currentLanguage}.`);
+    console.log(`[STT] Stream iniciado con ${sttLanguageCode} (latest_long, 24kHz, interims).`);
   };
 
-  const onSpeechData = async (data) => {
-    const result = data?.results?.[0];
-    if (!result) return;
+  async function onSpeechData(data) {
+    try {
+      const result = data.results?.[0];
+      if (!result) return;
 
-    const transcript = result.alternatives?.[0]?.transcript || "";
-    const isFinal = !!result.isFinal;
+      const transcript = result.alternatives?.[0]?.transcript || "";
+      const isFinal = !!result.isFinal;
 
-    // Emitimos “interim” solo para UI (súper útil para pintar “va hablando…”)
-    if (transcript && !isFinal) {
-      if (transcript !== lastPartial) {
-        lastPartial = transcript;
-        safeSend({ type: "transcript", text: transcript, isFinal: false });
-      }
-      return;
-    }
-
-    // Si es final, añadimos al historial y disparamos Gemini solo 1 vez
-    if (isFinal) {
-      if (transcript && transcript !== lastFinal) {
-        lastFinal = transcript;
-        safeSend({ type: "transcript", text: transcript, isFinal: true });
-        await getGeminiResponse(transcript.trim());
+      if (transcript) {
+        safeSend(clientWs, { type: "transcript", text: transcript, isFinal });
       }
 
-      // Tras cada utterance final, rearmamos stream para la siguiente intervención
-      // (opcional: si prefieres reutilizar, comenta la siguiente línea)
-      stopGoogleSpeechStream();
-      startGoogleSpeechStream(currentLanguage);
+      if (isFinal) {
+        const norm = transcript.trim().toLowerCase();
+        // Anti-duplicado por ecos y finales repetidos
+        if (norm && norm !== lastFinalNorm) {
+          lastFinalNorm = norm;
+          await getGeminiResponse(norm);
+        }
+      }
+    } catch (e) {
+      console.error("[onSpeechData ERROR]", e);
     }
-  };
+  }
 
-  const getGeminiResponse = async (userText) => {
+  async function getGeminiResponse(userText) {
     if (!geminiChat) return;
     try {
       const result = await geminiChat.sendMessageStream(userText || " ");
       let fullResponseText = "";
       for await (const item of result.stream) {
-        const chunk =
-          item?.candidates?.[0]?.content?.parts
-            ?.map((p) => p?.text || "")
-            .join("") || "";
-        fullResponseText += chunk;
+        fullResponseText += item.candidates?.[0].content?.parts.map((p) => p.text).join("") || "";
       }
-      const finalText = fullResponseText.trim();
-      if (finalText) safeSend({ type: "assistant_final", text: finalText });
+      if (fullResponseText.trim()) {
+        safeSend(clientWs, { type: "assistant_final", text: fullResponseText.trim() });
+      }
     } catch (error) {
       console.error("[GEMINI API ERROR]", error);
-      safeSend({ type: "error", message: `Error en la API de Gemini: ${error.message}` });
+      safeSend(clientWs, { type: "error", message: `Error en la API de Gemini: ${error.message}` });
     }
-  };
+  }
 
   clientWs.on("message", async (messageData) => {
-    // 1) Audio binario → se lo pasamos al stream (auto-start si no existe)
-    if (Buffer.isBuffer(messageData)) {
-      try {
-        if (!recognizeStream) startGoogleSpeechStream(currentLanguage);
-        recognizeStream.write(messageData);
-      } catch (e) {
-        console.error("[AUDIO WRITE ERROR]", e);
-      }
-      return;
-    }
-
-    // 2) Mensajes JSON (o texto tipo "stop")
-    let msg = null;
-    let raw = null;
-
     try {
-      raw = messageData.toString();
-      msg = JSON.parse(raw);
-    } catch {
-      // Compatibilidad: si nos mandan el string "stop" (legado)
-      if (raw && raw.trim().toLowerCase() === "stop") {
-        msg = { type: "audio.stop" };
-      } else {
-        console.warn("[WS] Mensaje no JSON ignorado:", raw?.slice?.(0, 80));
+      if (Buffer.isBuffer(messageData)) {
+        // Audio PCM16 mono 24 kHz del navegador
+        if (sttIsActive()) {
+          try { recognizeStream.write(messageData); }
+          catch (e) { console.warn("[STT write] ignorado (stream inactivo):", e?.message); }
+        }
         return;
       }
-    }
 
-    switch (msg.type) {
-      case "start_conversation":
-        try {
-          // AppCheck opcional según tengas activado ese flujo
-          if (appCheck && msg.appCheckToken) await appCheck.verifyToken(msg.appCheckToken);
+      // Mensaje textual
+      let msg;
+      try { msg = JSON.parse(messageData.toString()); }
+      catch {
+        // Compatibilidad: "stop" plano
+        if (String(messageData).trim().toLowerCase() === "stop") { endStt("legacy_stop"); }
+        else console.warn("[WS] Mensaje no-JSON ignorado:", String(messageData));
+        return;
+      }
 
-          const botSnap = await adminDb.collection("InteracBotGPT").doc(msg.botId).get();
-          if (!botSnap.exists) throw new Error("Bot no encontrado");
-          const botData = botSnap.data();
+      switch (msg.type) {
+        case "start_conversation": {
+          try {
+            await appCheck.verifyToken(msg.appCheckToken);
+            const botSnap = await adminDb.collection("InteracBotGPT").doc(msg.botId).get();
+            if (!botSnap.exists) throw new Error("Bot no encontrado");
+            const botData = botSnap.data();
 
-          currentLanguage = botData.language?.toLowerCase() === "en" ? "en-US" : "es-ES";
+            const langCode = (botData.language?.toLowerCase() === "en") ? "en-US" : "es-ES";
+            const systemPrompt =
+              `Simula que eres ${botData.Variable1 || "un asistente virtual"} y responde como crees que lo haría… ` +
+              (botData.Variable5 ? `En la primera interacción, tu primera frase debe ser exactamente: "${botData.Variable5}". ` : "") +
+              (botData.Variable2 || "");
 
-          const systemPrompt = `Simula que eres ${botData.Variable1 || "un asistente virtual"} y responde como crees que lo haría… ${
-            botData.Variable5 ? `En la primera interacción, tu primera frase debe ser exactamente: "${botData.Variable5}".` : ""
-          } ${botData.Variable2 || ""}`;
+            geminiChat = geminiModel.startChat({
+              systemInstruction: { role: "system", parts: [{ text: systemPrompt }] },
+            });
 
-          geminiChat = geminiModel.startChat({
-            systemInstruction: { role: "system", parts: [{ text: systemPrompt }] },
-          });
-
-          startGoogleSpeechStream(currentLanguage);
-
-          safeSend({ type: "info", message: "Backend conectado y listo." });
-          await getGeminiResponse("");
-        } catch (e) {
-          console.error("[START_CONV ERROR]", e);
-          safeSend({ type: "error", message: e.message });
+            safeSend(clientWs, { type: "info", message: "Backend conectado y listo." });
+            await getGeminiResponse("");
+          } catch (e) {
+            console.error("[START_CONV ERROR]", e);
+            safeSend(clientWs, { type: "error", message: e.message });
+          }
+          break;
         }
-        break;
 
-      case "conversation.item.create":
-        // Texto escrito desde el front
-        if (msg.item?.content?.[0]?.type === "input_text") {
-          // Para texto escrito no necesitamos STT; respondemos directo
-          await getGeminiResponse(msg.item.content[0].text);
+        case "audio.start": {
+          const lang = normalizeLang(msg.languageCode || "es-ES");
+          startSttStream(lang);
+          break;
         }
-        break;
 
-      case "audio.stop":
-        // El usuario soltó el botón → cerramos utterance actual para forzar FINAL
-        console.log("[WS] audio.stop recibido: cerrando stream STT para forzar final.");
-        stopGoogleSpeechStream();
-        // Reiniciamos listo para la siguiente
-        startGoogleSpeechStream(currentLanguage);
-        break;
+        case "audio.stop": {
+          endStt("client_stop");
+          break;
+        }
 
-      // Puedes añadir más mensajes si los necesitas (session_config, etc.)
+        case "conversation.item.create": {
+          const text = msg.item?.content?.[0]?.type === "input_text" ? msg.item.content[0].text : "";
+          if (text) await getGeminiResponse(text);
+          break;
+        }
+      }
+    } catch (e) {
+      console.error("[WS onmessage ERROR]", e);
+      safeSend(clientWs, { type: "error", message: e.message });
     }
   });
 
   clientWs.on("close", () => {
-    stopGoogleSpeechStream();
+    endStt("client_close");
     console.log("[CLIENT DISCONNECTED]");
   });
 });

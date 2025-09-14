@@ -58,7 +58,7 @@ try {
     console.log("✔️ SpeechClient inicializado.");
 
     vertexAI = new VertexAI({ project: process.env.GOOGLE_PROJECT_ID, location: process.env.GOOGLE_LOCATION || "us-central1" });
-    geminiModel = vertexAI.getGenerativeModel({ model: 'gemini-1.5-flash-001' });
+    geminiModel = vertexAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
     console.log("✔️ VertexAI (Gemini) inicializado.");
 
     console.log("✅ Todos los servicios se inicializaron correctamente.");

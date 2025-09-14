@@ -4,9 +4,9 @@
   "description": "Real-time avatar backend using Google Speech-to-Text and Gemini Flash.",
   "main": "index.js",
   "type": "module",
-  "scripts": {
-    "start": "node index.js"
-  },
+ "scripts": {
+  "start": "echo $GOOGLE_APPLICATION_CREDENTIALS_JSON > gcloud-credentials.json && export GOOGLE_APPLICATION_CREDENTIALS_JSON=$(pwd)/gcloud-credentials.json && node index.js"
+},
   "author": "",
   "license": "ISC",
   "dependencies": {

@@ -4,9 +4,6 @@ import expressWs from "express-ws";
 import dotenv from "dotenv";
 import cors from "cors";
 import admin from "firebase-admin";
-import fetch from "node-fetch";
-
-// Imports de Google Cloud
 import { SpeechClient } from "@google-cloud/speech";
 import { VertexAI, HarmCategory, HarmBlockThreshold } from "@google-cloud/vertexai";
 
@@ -15,59 +12,46 @@ const app = express();
 app.use(cors());
 expressWs(app);
 
-/*────────────────────── VARIABLES DE ENTORNO ───────────────────────*/
-// Clave de Firebase (como la tenías antes)
-const SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
-// Clave de Google Cloud (la nueva)
-const GOOGLE_APPLICATION_CREDENTIALS_JSON = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
-const GOOGLE_PROJECT_ID = process.env.GOOGLE_PROJECT_ID;
-const GOOGLE_LOCATION = process.env.GOOGLE_LOCATION || "us-central1"; // O la región que prefieras
-
-// Webhooks de n8n (como los tenías antes)
-const N8N_REPORT_WEBHOOK_URL = process.env.N8N_REPORT_WEBHOOK_URL;
-const N8N_SUPERVISOR_WEBHOOK_URL = process.env.N8N_SUPERVISOR_WEBHOOK_URL;
-
-if (!SERVICE_ACCOUNT_JSON || !GOOGLE_APPLICATION_CREDENTIALS_JSON || !GOOGLE_PROJECT_ID) {
-  console.error("CRITICAL: Faltan credenciales de Firebase o Google Cloud en las variables de entorno.");
+/*────────────────────── VARIABLES DE ENTORNO (Solo para validación) ───────────────────────*/
+// Ya no las usamos para inicializar, solo para comprobar que existen al arrancar.
+if (!process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON || !process.env.GOOGLE_PROJECT_ID) {
+  console.error("CRITICAL: Faltan GOOGLE_APPLICATION_CREDENTIALS_JSON o GOOGLE_PROJECT_ID en las variables de entorno de Railway.");
   process.exit(1);
 }
 
+const GOOGLE_PROJECT_ID = process.env.GOOGLE_PROJECT_ID;
+const GOOGLE_LOCATION = process.env.GOOGLE_LOCATION || "us-central1";
 
-// Función de ayuda para corregir el formato de la clave privada
-function fixPrivateKeyFormat(jsonString) {
-  if (!jsonString) return null;
-  const keyObject = JSON.parse(jsonString);
-  if (keyObject.private_key) {
-    keyObject.private_key = keyObject.private_key.replace(/\\n/g, '\n');
-  }
-  return keyObject;
+/*────────────────── INICIALIZACIÓN DE SERVICIOS (SIMPLIFICADA) ──────────────────*/
+try {
+  // Las librerías encontrarán las credenciales automáticamente gracias al script de start.
+  
+  // ¡Firebase necesita las credenciales explícitamente, pero puede leerlas del mismo archivo!
+  admin.initializeApp({
+    credential: admin.credential.applicationDefault(),
+  });
+  const adminDb = admin.firestore();
+
+  const speechClient = new SpeechClient();
+  const vertexAI = new VertexAI({ project: GOOGLE_PROJECT_ID, location: GOOGLE_LOCATION });
+
+  const geminiModel = vertexAI.getGenerativeModel({
+      model: 'gemini-1.5-flash-001',
+      safetySettings: [
+          { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
+          { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
+      ],
+  });
+
+  console.log("Servicios de Firebase y Google Cloud inicializados correctamente.");
+  
+} catch (error) {
+    console.error("CRITICAL: Fallo durante la inicialización de servicios.", error);
+    process.exit(1);
 }
 
-// Firebase Admin (¡MODIFICADO!)
-const firebaseServiceAccount = fixPrivateKeyFormat(SERVICE_ACCOUNT_JSON);
-admin.initializeApp({ credential: admin.credential.cert(firebaseServiceAccount) });
-const adminDb = admin.firestore();
 
-// Google Cloud Clients (¡MODIFICADO!)
-const googleCredentials = fixPrivateKeyFormat(GOOGLE_APPLICATION_CREDENTIALS_JSON);
-const speechClient = new SpeechClient({ credentials: googleCredentials });
-const vertexAI = new VertexAI({
-    project: GOOGLE_PROJECT_ID,
-    location: GOOGLE_LOCATION,
-    credentials: googleCredentials
-});
 
-// Modelo Gemini Flash
-const geminiModel = vertexAI.getGenerativeModel({
-    model: 'gemini-1.5-flash-001',
-    // Configuración de seguridad (opcional, pero recomendada)
-    safetySettings: [
-        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
-        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
-    ],
-});
-
-console.log("Servicios de Firebase y Google Cloud inicializados correctamente.");
 
 /*────────────────── SERVIDOR WEBSOCKET (/realtime-ws) ──────────────────*/
 app.ws("/realtime-ws", (clientWs, req) => {

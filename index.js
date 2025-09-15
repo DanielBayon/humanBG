@@ -92,10 +92,10 @@ try {
   
   // Verificar que el modelo esté disponible
   try {
-    geminiModel = vertexAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    console.log("✔️ VertexAI (Gemini 1.5 Flash) inicializado.");
+    geminiModel = vertexAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    console.log("✔️ VertexAI (Gemini 2.5 Flash) inicializado.");
   } catch (modelError) {
-    console.warn("Modelo gemini-1.5-flash no disponible, intentando con gemini-pro...");
+    console.warn("Modelo gemini-2.5-flash no disponible, intentando con gemini-pro...");
     try {
       geminiModel = vertexAI.getGenerativeModel({ model: "gemini-pro" });
       console.log("✔️ VertexAI (Gemini Pro) inicializado.");

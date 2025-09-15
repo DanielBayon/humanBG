@@ -127,12 +127,20 @@ const normalizeLang = (lang) => {
 /*────────────────── UTILIDADES GEMINI Y HERRAMIENTAS ──────────────────*/
 // Convierte tools estilo OpenAI → functionDeclarations de Gemini
 function toVertexFunctionDeclarations(tools = []) {
+  if (!Array.isArray(tools) || tools.length === 0) {
+    return [];
+  }
+  
   return tools
     .filter(t => t?.type === "function" && t.name)
     .map(t => ({
       name: t.name,
       description: t.description || "",
-      parameters: t.parameters || { type: "object", properties: {} }
+      parameters: {
+        type: "object",
+        properties: t.parameters?.properties || {},
+        required: t.parameters?.required || []
+      }
     }));
 }
 
@@ -552,9 +560,6 @@ app.ws("/realtime-ws", (clientWs) => {
       const result = await geminiChat.sendMessageStream(userText || " ");
 
       for await (const chunk of result.stream) {
-        // Debug log para ver la estructura del chunk
-        console.log("[GEMINI CHUNK DEBUG]", JSON.stringify(chunk, null, 2));
-
         // Verificar que chunk existe y tiene candidates
         if (!chunk || typeof chunk !== 'object') {
           console.warn("[GEMINI] Chunk inválido:", chunk);
@@ -634,10 +639,26 @@ app.ws("/realtime-ws", (clientWs) => {
 
   async function handleFunctionCall(functionCall) {
     try {
+      console.log("[TOOLS] Procesando function call:", JSON.stringify(functionCall, null, 2));
+      
       const name = functionCall.name;
-      const args = (typeof functionCall.args === "object" && functionCall.args !== null)
-        ? functionCall.args
-        : {};
+      let args = {};
+      
+      // Manejar diferentes formatos de argumentos
+      if (functionCall.args) {
+        if (typeof functionCall.args === "object" && functionCall.args !== null) {
+          args = functionCall.args;
+        } else if (typeof functionCall.args === "string") {
+          try {
+            args = JSON.parse(functionCall.args);
+          } catch (parseError) {
+            console.warn("[TOOLS] No se pudieron parsear los argumentos como JSON:", functionCall.arguments);
+            args = {};
+          }
+        }
+      }
+
+      console.log("[TOOLS] Argumentos procesados:", JSON.stringify(args, null, 2));
 
       // Dedupe
       const key = `${name}::${JSON.stringify(args)}`;
@@ -732,19 +753,32 @@ app.ws("/realtime-ws", (clientWs) => {
   }
 
   async function sendFunctionResponseToGemini(name, payload) {
-    // Gemini espera un role 'function' con un part functionResponse
-    await geminiChat.sendMessage({
-      role: "function",
-      parts: [{
-        functionResponse: {
-          name,
-          response: {
-            name,
-            content: [{ text: JSON.stringify(payload ?? {}) }]
+    try {
+      // Formato correcto para Vertex AI Gemini según documentación actual
+      const functionResponse = {
+        parts: [{
+          functionResponse: {
+            name: name,
+            response: payload
           }
-        }
-      }]
-    });
+        }]
+      };
+      
+      const result = await geminiChat.sendMessage(functionResponse);
+      console.log(`[TOOLS] Respuesta enviada a Gemini para herramienta ${name}`);
+      
+      return result;
+    } catch (error) {
+      console.error("[TOOLS] Error enviando respuesta a Gemini:", error);
+      // Fallback: enviar como mensaje de texto simple
+      try {
+        const fallbackMessage = `El resultado de la herramienta ${name} fue: ${JSON.stringify(payload)}`;
+        await geminiChat.sendMessage(fallbackMessage);
+        console.log(`[TOOLS] Fallback exitoso para herramienta ${name}`);
+      } catch (fallbackError) {
+        console.error("[TOOLS] Error en fallback también:", fallbackError);
+      }
+    }
   }
 
   async function streamFollowUpAfterTool() {
@@ -846,7 +880,6 @@ app.ws("/realtime-ws", (clientWs) => {
 
       // Inyectamos mensaje de sistema y pedimos nueva respuesta
       await geminiChat.sendMessage({
-        role: "system",
         parts: [{ text: finalCorrectionPrompt }]
       });
       
@@ -975,10 +1008,37 @@ app.ws("/realtime-ws", (clientWs) => {
             });
 
             // Iniciar chat de Gemini con herramientas
-            geminiChat = geminiModel.startChat({
-              systemInstruction: { role: "system", parts: [{ text: systemPrompt }] },
-              tools: { functionDeclarations: toVertexFunctionDeclarations(currentTools) }
-            });
+            const functionDeclarations = toVertexFunctionDeclarations(currentTools);
+            
+            let chatConfig = {
+              systemInstruction: {
+                parts: [{ text: systemPrompt }]
+              }
+            };
+            
+            // Solo agregar tools si hay herramientas definidas
+            if (functionDeclarations && functionDeclarations.length > 0) {
+              chatConfig.tools = [{
+                functionDeclarations: functionDeclarations
+              }];
+              console.log(`[GEMINI] Inicializando chat con ${functionDeclarations.length} herramientas:`, functionDeclarations.map(f => f.name));
+            } else {
+              console.log("[GEMINI] Inicializando chat sin herramientas");
+            }
+
+            try {
+              geminiChat = geminiModel.startChat(chatConfig);
+              console.log("[GEMINI] Chat inicializado correctamente");
+            } catch (chatError) {
+              console.error("[GEMINI] Error inicializando chat:", chatError);
+              // Fallback: inicializar sin herramientas
+              geminiChat = geminiModel.startChat({
+                systemInstruction: {
+                  parts: [{ text: systemPrompt }]
+                }
+              });
+              console.log("[GEMINI] Chat inicializado en modo fallback (sin herramientas)");
+            }
 
             // Crear documento de conversación
             if (!conversationId) {
@@ -1021,7 +1081,6 @@ app.ws("/realtime-ws", (clientWs) => {
                   const systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito.${fechaLegible ? ` Detalles: "${title}" para el ${fechaLegible}.` : ""}\n1) Confirma verbalmente la cita${fechaLegible ? " mencionando día y hora" : ""}.\n2) Indica que recibirá un email del sistema con el enlace a Google Meet para la videoconferencia y que le permite añadir la cita a su calendario.\n3) Pregunta si quiere que le envíes tú un correo con los detalles de la cita y algo más de información que le pueda interesar.`;
 
                   await geminiChat.sendMessage({
-                    role: "system",
                     parts: [{ text: systemText }]
                   });
                   await getGeminiResponse("");
@@ -1103,7 +1162,6 @@ app.ws("/realtime-ws", (clientWs) => {
 
           // Inyectar y responder
           await geminiChat.sendMessage({
-            role: "system",
             parts: [{ text: systemText }]
           });
           await getGeminiResponse("");

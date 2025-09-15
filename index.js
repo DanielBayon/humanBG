@@ -15,8 +15,17 @@ import os from "os";
 /*──────────────────── CREDENCIALES GOOGLE CLOUD ───────────────────*/
 try {
   console.log("Configurando credenciales de Google Cloud de forma programática...");
-  const jsonString = process.env.GOOGLE_CREDENTIALS_JSON;
-  if (!jsonString) throw new Error("La variable de entorno GOOGLE_CREDENTIALS_JSON no está definida.");
+  
+  // Intentar obtener las credenciales de diferentes variables de entorno
+  let jsonString = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON || 
+                   process.env.GOOGLE_CREDENTIALS_JSON || 
+                   process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+  
+  if (!jsonString) {
+    throw new Error("No se encontró ninguna variable de entorno con credenciales. Verificar GOOGLE_APPLICATION_CREDENTIALS_JSON, GOOGLE_CREDENTIALS_JSON o FIREBASE_SERVICE_ACCOUNT_KEY.");
+  }
+  
+  console.log("✔️ Variable de credenciales encontrada, escribiendo archivo temporal...");
   const credentialsPath = path.join(os.tmpdir(), "gcloud-credentials.json");
   fs.writeFileSync(credentialsPath, jsonString);
   process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
@@ -45,26 +54,60 @@ const activeConnections = new Map();
 let adminDb, speechClient, vertexAI, geminiModel, appCheck;
 
 try {
-  console.log("Inicializando servicios con credenciales por defecto del entorno...");
+  console.log("Inicializando servicios con credenciales configuradas...");
 
-  const firebaseApp = admin.initializeApp();
+  // Inicializar Firebase Admin SDK con las credenciales configuradas
+  let firebaseApp;
+  try {
+    // Verificar si ya existe una app inicializada
+    firebaseApp = admin.app();
+    console.log("✔️ Firebase app ya existe, reutilizando...");
+  } catch (error) {
+    // Si no existe, crear una nueva
+    const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+    if (serviceAccountKey) {
+      const serviceAccount = JSON.parse(serviceAccountKey);
+      firebaseApp = admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+      console.log("✔️ Firebase Admin SDK inicializado con service account key.");
+    } else {
+      // Usar credenciales por defecto
+      firebaseApp = admin.initializeApp();
+      console.log("✔️ Firebase Admin SDK inicializado con credenciales por defecto.");
+    }
+  }
+  
   adminDb = firebaseApp.firestore();
   appCheck = firebaseApp.appCheck();
-  console.log("✔️ Firebase Admin SDK y AppCheck inicializados.");
+  console.log("✔️ Firebase Firestore y AppCheck inicializados.");
 
   speechClient = new SpeechClient();
   console.log("✔️ SpeechClient inicializado.");
 
   vertexAI = new VertexAI({
-    project: process.env.GOOGLE_PROJECT_ID,
+    project: process.env.GOOGLE_PROJECT_ID || "botgpt-a284d",
     location: process.env.GOOGLE_LOCATION || "us-central1",
   });
-  geminiModel = vertexAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-  console.log("✔️ VertexAI (Gemini) inicializado.");
+  
+  // Verificar que el modelo esté disponible
+  try {
+    geminiModel = vertexAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    console.log("✔️ VertexAI (Gemini 1.5 Flash) inicializado.");
+  } catch (modelError) {
+    console.warn("Modelo gemini-1.5-flash no disponible, intentando con gemini-pro...");
+    try {
+      geminiModel = vertexAI.getGenerativeModel({ model: "gemini-pro" });
+      console.log("✔️ VertexAI (Gemini Pro) inicializado.");
+    } catch (fallbackError) {
+      throw new Error(`No se pudo inicializar ningún modelo de Gemini: ${fallbackError.message}`);
+    }
+  }
 
   console.log("✅ Todos los servicios se inicializaron correctamente.");
 } catch (error) {
   console.error("CRITICAL: Fallo durante la inicialización de servicios.", error);
+  console.error("Stack trace:", error.stack);
   process.exit(1);
 }
 
@@ -509,20 +552,38 @@ app.ws("/realtime-ws", (clientWs) => {
       const result = await geminiChat.sendMessageStream(userText || " ");
 
       for await (const chunk of result.stream) {
-        const candidates = chunk.candidates || [];
+        // Debug log para ver la estructura del chunk
+        console.log("[GEMINI CHUNK DEBUG]", JSON.stringify(chunk, null, 2));
+
+        // Verificar que chunk existe y tiene candidates
+        if (!chunk || typeof chunk !== 'object') {
+          console.warn("[GEMINI] Chunk inválido:", chunk);
+          continue;
+        }
+
+        const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
+        
         for (const cand of candidates) {
-          const parts = (cand.content && cand.content.parts) ? cand.content.parts : [];
+          // Verificar que el candidato tiene content y parts
+          if (!cand || !cand.content || !Array.isArray(cand.content.parts)) {
+            console.warn("[GEMINI] Candidato sin parts válidas:", cand);
+            continue;
+          }
+
+          const parts = cand.content.parts;
+          
           for (const part of parts) {
             // Texto del asistente (delta)
-            if (typeof part.text === "string" && part.text.length) {
+            if (part && typeof part.text === "string" && part.text.length > 0) {
               fullText += part.text;
               safeSend(clientWs, { type: "assistant_delta", delta: part.text });
             }
 
             // Llamada a herramienta (functionCall)
-            if (part.functionCall && !toolAlreadyHandledThisTurn) {
+            if (part && part.functionCall && !toolAlreadyHandledThisTurn) {
               toolAlreadyHandledThisTurn = true;
               const fc = part.functionCall;
+              console.log("[GEMINI] Function call detectada:", JSON.stringify(fc, null, 2));
               await handleFunctionCall(fc);
               return;
             }
@@ -688,31 +749,52 @@ app.ws("/realtime-ws", (clientWs) => {
 
   async function streamFollowUpAfterTool() {
     let followText = "";
-    const follow = await geminiChat.sendMessageStream(""); // trigger del turno post-herramienta
-    for await (const chunk of follow.stream) {
-      const candidates = chunk.candidates || [];
-      for (const cand of candidates) {
-        const parts = (cand.content && cand.content.parts) ? cand.content.parts : [];
-        for (const part of parts) {
-          if (typeof part.text === "string" && part.text.length) {
-            followText += part.text;
-            safeSend(clientWs, { type: "assistant_delta", delta: part.text });
+    try {
+      const follow = await geminiChat.sendMessageStream(""); // trigger del turno post-herramienta
+      
+      for await (const chunk of follow.stream) {
+        // Verificar que chunk existe y tiene candidates
+        if (!chunk || typeof chunk !== 'object') {
+          console.warn("[GEMINI FOLLOW] Chunk inválido:", chunk);
+          continue;
+        }
+
+        const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
+        
+        for (const cand of candidates) {
+          // Verificar que el candidato tiene content y parts
+          if (!cand || !cand.content || !Array.isArray(cand.content.parts)) {
+            console.warn("[GEMINI FOLLOW] Candidato sin parts válidas:", cand);
+            continue;
+          }
+
+          const parts = cand.content.parts;
+          
+          for (const part of parts) {
+            if (part && typeof part.text === "string" && part.text.length > 0) {
+              followText += part.text;
+              safeSend(clientWs, { type: "assistant_delta", delta: part.text });
+            }
           }
         }
       }
-    }
-    const final = (followText || "").trim();
-    if (final) {
-      safeSend(clientWs, { type: "assistant_final", text: final });
-      fullConversationTranscript += `\nAI-BOT: ${final}`;
-      try {
-        if (conversationId && conversationCreated) {
-          await adminDb.collection("Conversations").doc(conversationId)
-            .update({ BotTranscripcion: fullConversationTranscript, Timestamp: admin.firestore.Timestamp.now() });
+      
+      const final = (followText || "").trim();
+      if (final) {
+        safeSend(clientWs, { type: "assistant_final", text: final });
+        fullConversationTranscript += `\nAI-BOT: ${final}`;
+        try {
+          if (conversationId && conversationCreated) {
+            await adminDb.collection("Conversations").doc(conversationId)
+              .update({ BotTranscripcion: fullConversationTranscript, Timestamp: admin.firestore.Timestamp.now() });
+          }
+        } catch (e) {
+          console.warn("[DB WARN] No se pudo guardar transcript post-tool:", e.message);
         }
-      } catch (e) {
-        console.warn("[DB WARN] No se pudo guardar transcript post-tool:", e.message);
       }
+    } catch (error) {
+      console.error("[GEMINI FOLLOW ERROR]", error);
+      safeSend(clientWs, { type: "error", message: `Error en seguimiento post-tool: ${error.message}` });
     }
   }
 

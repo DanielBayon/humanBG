@@ -566,9 +566,22 @@ app.ws("/realtime-ws", (clientWs) => {
           continue;
         }
 
+        // Verificar finishReason y blockedReason para debugging
+        if (chunk.finishReason) {
+          console.log(`[GEMINI] Finish reason: ${chunk.finishReason}`);
+        }
+        if (chunk.blockedReason) {
+          console.warn(`[GEMINI] Blocked reason: ${chunk.blockedReason}`);
+        }
+
         const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
         
         for (const cand of candidates) {
+          // Verificar finishReason del candidato
+          if (cand.finishReason) {
+            console.log(`[GEMINI] Candidate finish reason: ${cand.finishReason}`);
+          }
+          
           // Verificar que el candidato tiene content y parts
           if (!cand || !cand.content || !Array.isArray(cand.content.parts)) {
             console.warn("[GEMINI] Candidato sin parts válidas:", cand);
@@ -585,10 +598,16 @@ app.ws("/realtime-ws", (clientWs) => {
             }
 
             // Llamada a herramienta (functionCall)
+            // Nota: Los modelos 2.5 soportan parallel function calling
+            // pero mantenemos política de "una por turno"
             if (part && part.functionCall && !toolAlreadyHandledThisTurn) {
               toolAlreadyHandledThisTurn = true;
               const fc = part.functionCall;
               console.log("[GEMINI] Function call detectada:", JSON.stringify(fc, null, 2));
+              
+              // Si hubiera múltiples function calls en el mismo candidate,
+              // aparecerían como parts adicionales con functionCall
+              // Por política actual, procesamos solo la primera
               await handleFunctionCall(fc);
               return;
             }
@@ -755,16 +774,18 @@ app.ws("/realtime-ws", (clientWs) => {
   async function sendFunctionResponseToGemini(name, payload) {
     try {
       // Formato correcto para Vertex AI Gemini según documentación actual
-      const functionResponse = {
-        parts: [{
-          functionResponse: {
+      // El response debe incluir { name, content } según SDK de Node
+      const functionResponseParts = [{
+        functionResponse: {
+          name: name,
+          response: {
             name: name,
-            response: payload
+            content: payload
           }
-        }]
-      };
+        }
+      }];
       
-      const result = await geminiChat.sendMessage(functionResponse);
+      const result = await geminiChat.sendMessage(functionResponseParts);
       console.log(`[TOOLS] Respuesta enviada a Gemini para herramienta ${name}`);
       
       return result;
@@ -773,7 +794,7 @@ app.ws("/realtime-ws", (clientWs) => {
       // Fallback: enviar como mensaje de texto simple
       try {
         const fallbackMessage = `El resultado de la herramienta ${name} fue: ${JSON.stringify(payload)}`;
-        await geminiChat.sendMessage(fallbackMessage);
+        await geminiChat.sendMessage([{text: fallbackMessage}]);
         console.log(`[TOOLS] Fallback exitoso para herramienta ${name}`);
       } catch (fallbackError) {
         console.error("[TOOLS] Error en fallback también:", fallbackError);
@@ -793,9 +814,22 @@ app.ws("/realtime-ws", (clientWs) => {
           continue;
         }
 
+        // Verificar finishReason y blockedReason para debugging
+        if (chunk.finishReason) {
+          console.log(`[GEMINI FOLLOW] Finish reason: ${chunk.finishReason}`);
+        }
+        if (chunk.blockedReason) {
+          console.warn(`[GEMINI FOLLOW] Blocked reason: ${chunk.blockedReason}`);
+        }
+
         const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
         
         for (const cand of candidates) {
+          // Verificar finishReason del candidato
+          if (cand.finishReason) {
+            console.log(`[GEMINI FOLLOW] Candidate finish reason: ${cand.finishReason}`);
+          }
+          
           // Verificar que el candidato tiene content y parts
           if (!cand || !cand.content || !Array.isArray(cand.content.parts)) {
             console.warn("[GEMINI FOLLOW] Candidato sin parts válidas:", cand);
@@ -879,9 +913,9 @@ app.ws("/realtime-ws", (clientWs) => {
     `;
 
       // Inyectamos mensaje de sistema y pedimos nueva respuesta
-      await geminiChat.sendMessage({
-        parts: [{ text: finalCorrectionPrompt }]
-      });
+      await geminiChat.sendMessage([{
+        text: finalCorrectionPrompt
+      }]);
       
       await getGeminiResponse("");
       console.log('[CORRECTION] Mensaje de corrección enviado a Gemini.');
@@ -1021,7 +1055,17 @@ app.ws("/realtime-ws", (clientWs) => {
               chatConfig.tools = [{
                 functionDeclarations: functionDeclarations
               }];
+              
+              // Configurar toolConfig para controlar comportamiento de herramientas
+              chatConfig.toolConfig = {
+                functionCallingConfig: {
+                  mode: 'AUTO', // AUTO permite al modelo decidir cuándo llamar herramientas
+                  allowedFunctionNames: functionDeclarations.map(f => f.name)
+                }
+              };
+              
               console.log(`[GEMINI] Inicializando chat con ${functionDeclarations.length} herramientas:`, functionDeclarations.map(f => f.name));
+              console.log(`[GEMINI] ToolConfig mode: AUTO, allowed functions:`, functionDeclarations.map(f => f.name));
             } else {
               console.log("[GEMINI] Inicializando chat sin herramientas");
             }
@@ -1080,9 +1124,9 @@ app.ws("/realtime-ws", (clientWs) => {
 
                   const systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito.${fechaLegible ? ` Detalles: "${title}" para el ${fechaLegible}.` : ""}\n1) Confirma verbalmente la cita${fechaLegible ? " mencionando día y hora" : ""}.\n2) Indica que recibirá un email del sistema con el enlace a Google Meet para la videoconferencia y que le permite añadir la cita a su calendario.\n3) Pregunta si quiere que le envíes tú un correo con los detalles de la cita y algo más de información que le pueda interesar.`;
 
-                  await geminiChat.sendMessage({
-                    parts: [{ text: systemText }]
-                  });
+                  await geminiChat.sendMessage([{
+                    text: systemText
+                  }]);
                   await getGeminiResponse("");
                 }
               });
@@ -1161,9 +1205,9 @@ app.ws("/realtime-ws", (clientWs) => {
           }
 
           // Inyectar y responder
-          await geminiChat.sendMessage({
-            parts: [{ text: systemText }]
-          });
+          await geminiChat.sendMessage([{
+            text: systemText
+          }]);
           await getGeminiResponse("");
           break;
         }

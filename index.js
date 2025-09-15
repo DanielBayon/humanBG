@@ -1050,22 +1050,42 @@ app.ws("/realtime-ws", (clientWs) => {
               }
             };
             
-            // Solo agregar tools si hay herramientas definidas
             if (functionDeclarations && functionDeclarations.length > 0) {
+              // Declaraciones de herramientas
               chatConfig.tools = [{
                 functionDeclarations: functionDeclarations
               }];
-              
-              // Configurar toolConfig para controlar comportamiento de herramientas
-              chatConfig.toolConfig = {
-                functionCallingConfig: {
-                  mode: 'AUTO', // AUTO permite al modelo decidir cuándo llamar herramientas
-                  allowedFunctionNames: functionDeclarations.map(f => f.name)
-                }
-              };
-              
-              console.log(`[GEMINI] Inicializando chat con ${functionDeclarations.length} herramientas:`, functionDeclarations.map(f => f.name));
-              console.log(`[GEMINI] ToolConfig mode: AUTO, allowed functions:`, functionDeclarations.map(f => f.name));
+
+              // Permitir alternar el modo por ENV (AUTO por defecto)
+              const FUNCTION_CALL_MODE = (process.env.GEMINI_FUNCTION_CALL_MODE || 'AUTO').toUpperCase();
+              const allowedNames = functionDeclarations.map(f => f.name);
+
+              // Construcción correcta según documentación:
+              // - AUTO: NO se permite allowedFunctionNames
+              // - ANY : Puedes (opcionalmente) pasar allowedFunctionNames
+              if (FUNCTION_CALL_MODE === 'ANY') {
+                chatConfig.toolConfig = {
+                  functionCallingConfig: {
+                    mode: 'ANY',
+                    // puedes restringir a las funciones permitidas:
+                    allowedFunctionNames: allowedNames
+                  }
+                };
+                console.log(`[GEMINI] ToolConfig mode=ANY, allowed functions:`, allowedNames);
+              } else if (FUNCTION_CALL_MODE === 'NONE') {
+                chatConfig.toolConfig = {
+                  functionCallingConfig: { mode: 'NONE' }
+                };
+                console.log(`[GEMINI] ToolConfig mode=NONE (prohibidas las tools)`);
+              } else {
+                // AUTO (por defecto) → sin allowedFunctionNames
+                chatConfig.toolConfig = {
+                  functionCallingConfig: { mode: 'AUTO' }
+                };
+                console.log(`[GEMINI] ToolConfig mode=AUTO (sin allowedFunctionNames)`);
+              }
+
+              console.log(`[GEMINI] Inicializando chat con ${functionDeclarations.length} herramientas:`, allowedNames);
             } else {
               console.log("[GEMINI] Inicializando chat sin herramientas");
             }

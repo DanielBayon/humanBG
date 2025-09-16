@@ -1168,8 +1168,9 @@ app.ws("/realtime-ws", (clientWs) => {
           break;
 
         case "user_action_completed": {
+          console.log(`[DEBUG] Recibido user_action_completed. isPausedForUserAction: ${isPausedForUserAction}`);
           if (!isPausedForUserAction) {
-            console.log("⚠️ Conversación ya reanudada (probablemente por webhook). Ignorando.");
+            console.log("⚠️ Recibido user_action_completed pero no estaba pausado para acción de usuario. IGNORANDO completamente.");
             break;
           }
 

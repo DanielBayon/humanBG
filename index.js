@@ -41,11 +41,17 @@ app.use(cors({ origin: "*" }));
 expressWs(app);
 
 /*────────────────── ENV VARS Y CONFIGURACIÓN ───────────────────────*/
-// URLs y secretos de n8n y supervisión
-const N8N_REPORT_WEBHOOK_URL = "https://n8n.srv863010.hstgr.cloud/webhook/cbd9348c-7665-44a7-a2fc-eecbeb387b3c";
-const N8N_SUPERVISOR_WEBHOOK_URL = "https://n8n.srv863010.hstgr.cloud/webhook/fc528e23-f551-4cb0-a247-62063b4e4b40";
+// URLs y secretos de n8n y supervisión (por defecto, se puede sobrescribir por bot)
+const DEFAULT_N8N_REPORT_WEBHOOK_URL = "https://n8n.srv863010.hstgr.cloud/webhook/cbd9348c-7665-44a7-a2fc-eecbeb387b3c";
+const DEFAULT_N8N_SUPERVISOR_WEBHOOK_URL = "https://n8n.srv863010.hstgr.cloud/webhook/fc528e23-f551-4cb0-a247-62063b4e4b40";
 const SUPERVISOR_SECRET = "un_secreto_muy_largo_y_seguro_que_inventes";
 const CALCOM_WEBHOOK_SECRET = "otro_secreto_muy_largo_y_seguro_que_inventes";
+
+// Control de validación del supervisor (para debugging)
+const ENABLE_SUPERVISOR_VALIDATION = process.env.ENABLE_SUPERVISOR_VALIDATION !== "false";
+const ENABLE_TOOL_EXECUTION_LOGGING = process.env.ENABLE_TOOL_EXECUTION_LOGGING !== "false";
+console.log(`[CONFIG] Validación del supervisor: ${ENABLE_SUPERVISOR_VALIDATION ? "HABILITADA" : "DESHABILITADA"}`);
+console.log(`[CONFIG] Logging detallado de herramientas: ${ENABLE_TOOL_EXECUTION_LOGGING ? "HABILITADO" : "DESHABILITADO"}`);
 
 // Mapa de conexiones activas para supervisión
 const activeConnections = new Map();
@@ -154,8 +160,11 @@ function buildToolHandlers(n8nWebhookUrl, getContext) {
     ejecutar_orden_n8n: async ({ orden }, meta = {}) => {
       const { conversationId, botId, fullConversation } = getContext();
       console.log(`[TOOL] ejecutar_orden_n8n → "${orden}" para ConversationID: ${conversationId}`);
+      console.log(`[TOOL] Meta datos recibidos:`, JSON.stringify(meta, null, 2));
+      console.log(`[TOOL] URL del webhook n8n: ${n8nWebhookUrl}`);
 
       if (!orden || typeof orden !== "string") {
+        console.error(`[TOOL ERROR] Argumento orden inválido:`, { orden, type: typeof orden });
         return { status: "error", message: "Falta argumento «orden» (string)" };
       }
       if (!conversationId) {
@@ -165,6 +174,7 @@ function buildToolHandlers(n8nWebhookUrl, getContext) {
 
       // Clave idempotente vinculada al tool call
       const dedupeKey = `${conversationId || 'no-conv'}::${botId || 'no-bot'}::${meta.responseId || 'no-resp'}::${meta.toolCallId || 'no-call'}`;
+      console.log(`[TOOL] Clave de deduplicación: ${dedupeKey}`);
 
       // Registro idempotente en Firestore
       let alreadySent = false;
@@ -194,6 +204,10 @@ function buildToolHandlers(n8nWebhookUrl, getContext) {
 
       // Llamada a n8n con dedupeKey
       try {
+        console.log(`[TOOL] Enviando petición a n8n...`);
+        console.log(`[TOOL] URL del webhook de herramientas: ${n8nWebhookUrl}`);
+        console.log(`[TOOL] Payload:`, JSON.stringify({ orden, conversationId, botId, fullConversation, dedupeKey }, null, 2));
+        
         const resp = await fetch(n8nWebhookUrl, {
           method: "POST",
           headers: {
@@ -204,14 +218,23 @@ function buildToolHandlers(n8nWebhookUrl, getContext) {
           timeout: 15000,
         });
 
+        console.log(`[TOOL] Respuesta de n8n - Status: ${resp.status}`);
+        console.log(`[TOOL] Headers de respuesta:`, Object.fromEntries(resp.headers.entries()));
+
         const body = await resp.text();
-        return {
+        console.log(`[TOOL] Cuerpo de respuesta de n8n:`, body);
+
+        const result = {
           status: resp.ok ? "success" : "error",
           http_status: resp.status,
           response: body,
         };
+        
+        console.log(`[TOOL] Resultado final de ejecutar_orden_n8n:`, JSON.stringify(result, null, 2));
+        return result;
       } catch (err) {
-        console.error("[TOOL ERROR] n8n:", err);
+        console.error("[TOOL ERROR] Error en llamada a n8n:", err);
+        console.error("[TOOL ERROR] Stack trace:", err.stack);
         return { status: "error", message: err.message };
       }
     },
@@ -344,8 +367,10 @@ ${firstLine}
  * Envía datos de un turno de conversación al webhook supervisor de n8n.
  * Es una operación de "disparar y olvidar" que no bloquea el flujo principal.
  */
-async function triggerSupervisorWorkflow(data) {
-  if (!N8N_SUPERVISOR_WEBHOOK_URL) {
+async function triggerSupervisorWorkflow(data, supervisorWebhookUrl = null) {
+  const webhookUrl = supervisorWebhookUrl || DEFAULT_N8N_SUPERVISOR_WEBHOOK_URL;
+  
+  if (!webhookUrl) {
     return; // No hacer nada si la URL no está configurada
   }
 
@@ -353,7 +378,7 @@ async function triggerSupervisorWorkflow(data) {
   console.log(`[SUPERVISION] Datos del turno:`, JSON.stringify(data.currentTurn, null, 2));
 
   try {
-    fetch(N8N_SUPERVISOR_WEBHOOK_URL, {
+    fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
@@ -375,32 +400,74 @@ async function triggerSupervisorWorkflow(data) {
 /**
  * Envía una propuesta de llamada a herramienta al supervisor y ESPERA su veredicto.
  */
-async function triggerToolValidationWorkflow(toolCallData) {
-  if (!N8N_SUPERVISOR_WEBHOOK_URL) {
-    console.warn("[VALIDATION] Supervisor no configurado. Aprobando herramienta automáticamente.");
+async function triggerToolValidationWorkflow(toolCallData, supervisorWebhookUrl = null) {
+  const webhookUrl = supervisorWebhookUrl || DEFAULT_N8N_SUPERVISOR_WEBHOOK_URL;
+  
+  if (!webhookUrl || !ENABLE_SUPERVISOR_VALIDATION) {
+    if (!ENABLE_SUPERVISOR_VALIDATION) {
+      console.warn("[VALIDATION] Validación del supervisor deshabilitada por configuración. Aprobando herramienta automáticamente.");
+    } else {
+      console.warn("[VALIDATION] Supervisor no configurado. Aprobando herramienta automáticamente.");
+    }
     return { status: "approved" };
   }
 
   console.log(`[VALIDATION] Pidiendo permiso para ejecutar herramienta en conv ${toolCallData.conversationId}...`);
+  console.log(`[VALIDATION] URL del webhook: ${webhookUrl}`);
+  console.log(`[VALIDATION] Datos enviados:`, JSON.stringify(toolCallData, null, 2));
+  
   try {
-    const response = await fetch(N8N_SUPERVISOR_WEBHOOK_URL, {
+    const response = await fetch(webhookUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { 
+        "Content-Type": "application/json",
+        "User-Agent": "HumanBG-Backend/1.0"
+      },
       body: JSON.stringify(toolCallData),
       timeout: 15000,
     });
 
+    console.log(`[VALIDATION] Respuesta HTTP status: ${response.status}`);
+    console.log(`[VALIDATION] Respuesta headers:`, Object.fromEntries(response.headers.entries()));
+
     if (!response.ok) {
       console.error(`[VALIDATION ERROR] El webhook de validación respondió con estado ${response.status}.`);
+      // Intentar leer el cuerpo de la respuesta para debugging
+      try {
+        const errorBody = await response.text();
+        console.error(`[VALIDATION ERROR] Cuerpo de respuesta de error:`, errorBody);
+      } catch (readError) {
+        console.error(`[VALIDATION ERROR] No se pudo leer el cuerpo de la respuesta de error:`, readError.message);
+      }
       return { status: "correction", message: "SUPERVISOR: Hubo un error interno al validar la acción. Pide disculpas e intenta de nuevo." };
     }
 
-    const decision = await response.json();
-    console.log(`[VALIDATION] Decisión del supervisor recibida: ${decision.status}`);
-    return decision;
+    // Intentar leer como texto primero para debugging
+    const responseText = await response.text();
+    console.log(`[VALIDATION] Respuesta raw:`, responseText);
 
-  } catch (error) {
+    if (!responseText.trim()) {
+      console.error(`[VALIDATION ERROR] Respuesta vacía del webhook`);
+      return { status: "correction", message: "SUPERVISOR: El sistema de validación devolvió una respuesta vacía. Pide disculpas e intenta de nuevo." };
+    }
+
+    let decision;
+    try {
+      decision = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error(`[VALIDATION ERROR] Error parseando JSON de respuesta:`, parseError.message);
+      console.error(`[VALIDATION ERROR] Contenido que no se pudo parsear:`, responseText);
+      return { status: "correction", message: "SUPERVISOR: El sistema de validación devolvió una respuesta inválida. Pide disculpas e intenta de nuevo." };
+    }
+
+      console.log(`[VALIDATION] Decisión del supervisor recibida: ${decision.status}`);
+      console.log(`[VALIDATION] Detalles de la decisión:`, JSON.stringify(decision, null, 2));
+      return decision;  } catch (error) {
     console.error(`[VALIDATION FATAL] Fallo al contactar el webhook de validación:`, error.message);
+    console.error(`[VALIDATION FATAL] Tipo de error:`, error.constructor.name);
+    if (error.stack) {
+      console.error(`[VALIDATION FATAL] Stack trace:`, error.stack);
+    }
     return { status: "correction", message: "SUPERVISOR: No se pudo contactar con el sistema de validación. Pide disculpas y di que no puedes completar la acción en este momento." };
   }
 }
@@ -408,8 +475,10 @@ async function triggerToolValidationWorkflow(toolCallData) {
 /**
  * Envía la transcripción final al webhook de n8n para generar informes.
  */
-async function triggerReportWorkflow(convId, transcript) {
-  if (!N8N_REPORT_WEBHOOK_URL) {
+async function triggerReportWorkflow(convId, transcript, reportWebhookUrl = null) {
+  const webhookUrl = reportWebhookUrl || DEFAULT_N8N_REPORT_WEBHOOK_URL;
+  
+  if (!webhookUrl) {
     console.log("[N8N REPORT] El webhook de informes no está configurado. Omitiendo.");
     return;
   }
@@ -417,7 +486,7 @@ async function triggerReportWorkflow(convId, transcript) {
   console.log(`[N8N REPORT] Disparando workflow para la conversación ${convId}...`);
 
   try {
-    const response = await fetch(N8N_REPORT_WEBHOOK_URL, {
+    const response = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -463,6 +532,11 @@ app.ws("/realtime-ws", (clientWs) => {
   let currentUserTranscript = "";
   let currentUserInputSource = "voice";
   let isCorrecting = false;
+  
+  // Webhooks específicos del bot
+  let currentN8nWebhook = "";
+  let currentSupervisorWebhook = "";
+  let currentReportWebhook = "";
   
   // Estados para deduplicación de herramientas
   const seenToolCalls = new Set();
@@ -643,7 +717,7 @@ app.ws("/realtime-ws", (clientWs) => {
               botResponse: final,
               toolCall: null
             }
-          });
+          }, currentSupervisorWebhook);
         }
         
         // Limpieza para siguiente turno
@@ -692,13 +766,18 @@ app.ws("/realtime-ws", (clientWs) => {
 
       // Validación previa con supervisor (opcional)
       let decision = { status: "approved" };
-      if (isSupervised) {
+      if (isSupervised && ENABLE_SUPERVISOR_VALIDATION) {
+        console.log(`[VALIDATION] Bot supervisado, validando herramienta con n8n...`);
         decision = await triggerToolValidationWorkflow({
           botId: currentBotId,
           conversationId,
           fullConversation: fullConversationTranscript,
           toolCall: { name, arguments: args }
-        });
+        }, currentSupervisorWebhook);
+      } else if (isSupervised && !ENABLE_SUPERVISOR_VALIDATION) {
+        console.log(`[VALIDATION] Bot supervisado pero validación deshabilitada. Ejecutando herramienta directamente.`);
+      } else {
+        console.log(`[VALIDATION] Bot no supervisado. Ejecutando herramienta directamente.`);
       }
 
       if (decision?.status === "correction" && decision?.message) {
@@ -708,8 +787,22 @@ app.ws("/realtime-ws", (clientWs) => {
         return;
       }
 
+      if (decision?.status === "denied") {
+        console.log(`[VALIDATION] Herramienta ${name} DENEGADA por el supervisor`);
+        const denyMessage = decision?.message || "El supervisor ha denegado la ejecución de esta herramienta.";
+        await sendFunctionResponseToGemini(name, { status: "error", message: denyMessage });
+        safeSend(clientWs, { type: "tool_execution_end", toolName: name, success: false });
+        await streamFollowUpAfterTool();
+        return;
+      }
+
+      if (decision?.status !== "approved") {
+        console.warn(`[VALIDATION] Decisión del supervisor no reconocida: ${decision?.status}. Procediendo con ejecución.`);
+      }
+
       if (!toolHandlers[name]) {
         const err = { status: "error", message: `La herramienta «${name}» no existe.` };
+        console.error(`[TOOL ERROR] Herramienta inexistente: ${name}`);
         await sendFunctionResponseToGemini(name, err);
         safeSend(clientWs, { type: "tool_execution_end", toolName: name, success: false });
         await streamFollowUpAfterTool();
@@ -717,7 +810,12 @@ app.ws("/realtime-ws", (clientWs) => {
       }
 
       // Ejecuta herramienta real
+      console.log(`[TOOL EXECUTION] Iniciando ejecución de herramienta: ${name}`);
+      console.log(`[TOOL EXECUTION] Argumentos para ${name}:`, JSON.stringify(args, null, 2));
+      
       const result = await toolHandlers[name](args, { toolCallId: crypto.randomUUID?.() || Date.now().toString() });
+      
+      console.log(`[TOOL EXECUTION] Resultado de ${name}:`, JSON.stringify(result, null, 2));
       safeSend(clientWs, { type: "tool_execution_end", toolName: name, success: result?.status === "success" });
 
       // Entregar la salida de la herramienta al modelo (functionResponse)
@@ -745,7 +843,7 @@ app.ws("/realtime-ws", (clientWs) => {
             botResponse: null,
             toolCall: { name, arguments: args, result }
           }
-        });
+        }, currentSupervisorWebhook);
       }
 
       // Limpieza para siguiente turno
@@ -963,7 +1061,17 @@ app.ws("/realtime-ws", (clientWs) => {
             console.log(`[CONFIG] Estado de supervisión para bot ${currentBotId}: ${isSupervised}`);
 
             currentCreadorBot = botData.userId;
-            let currentN8nWebhook = botData.n8nWebhookUrl || "";
+            currentN8nWebhook = botData.n8nWebhookUrl || "";
+            
+            // Configurar webhooks específicos del bot (con fallback a los por defecto)
+            currentSupervisorWebhook = botData.supervisorWebhookUrl || DEFAULT_N8N_SUPERVISOR_WEBHOOK_URL;
+            currentReportWebhook = botData.reportWebhookUrl || DEFAULT_N8N_REPORT_WEBHOOK_URL;
+            
+            console.log(`[CONFIG] Webhooks para bot ${currentBotId}:`);
+            console.log(`[CONFIG] - N8N Herramientas: ${currentN8nWebhook || "No configurado"}`);
+            console.log(`[CONFIG] - N8N Supervisor: ${currentSupervisorWebhook}`);
+            console.log(`[CONFIG] - N8N Reports: ${currentReportWebhook}`);
+            
             const bookingUrl = botData.book?.calendlyUrl || null;
             const sistemaAgendado = botData.book?.sistemaAgendado === true;
             currentFacturaADestinatario = !!botData.facturaADestinatario;
@@ -1280,7 +1388,7 @@ app.ws("/realtime-ws", (clientWs) => {
     console.log(`[CLIENT DISCONNECTED] - Código: ${code}, Razón: ${String(reason)}`);
     
     if (conversationId && fullConversationTranscript.trim() !== "") {
-      triggerReportWorkflow(conversationId, fullConversationTranscript);
+      triggerReportWorkflow(conversationId, fullConversationTranscript, currentReportWebhook);
     } else {
       console.log("[REPORT] No se generará informe: no hubo conversación o ID.");
     }

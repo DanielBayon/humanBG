@@ -92,12 +92,12 @@ try {
 
   vertexAI = new VertexAI({
     project: process.env.GOOGLE_PROJECT_ID || "botgpt-a284d",
-    location: process.env.GOOGLE_LOCATION || "us-east1",
+    location: process.env.GOOGLE_LOCATION || "us-central1",
   });
   
   // Verificar que el modelo esté disponible
   try {
-    geminiModel = vertexAI.getGenerativeModel({ model: "gemini-2.5-flash-preview-09-2025" });
+    geminiModel = vertexAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
     console.log("✔️ VertexAI (Gemini 2.5 Flash) inicializado.");
   } catch (modelError) {
     console.warn("Modelo gemini-2.5-flash no disponible, intentando con gemini-pro...");

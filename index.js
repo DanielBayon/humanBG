@@ -598,6 +598,12 @@ app.ws("/realtime-ws", (clientWs) => {
   async function getGeminiResponse(userText) {
     if (!geminiChat) return;
 
+    // 🚨 CRÍTICO: Si está pausado para acción de usuario, ignorar completamente (igual que OpenAI)
+    if (isPausedForUserAction) {
+      console.log("⏸️ [GEMINI] Conversación pausada para acción de usuario. Ignorando input.");
+      return;
+    }
+
     let fullText = "";
     let toolAlreadyHandledThisTurn = false;
 
@@ -770,8 +776,8 @@ app.ws("/realtime-ws", (clientWs) => {
         // Pasar información sobre el éxito de la herramienta
         await streamFollowUpAfterTool(result?.status === "success", name, args.orden);
       } else {
-        console.log(`[TOOL_FLOW] Pausa iniciada para agendamiento. Backend espera.`);
-        isPausedForUserAction = true;
+        // 🚨 CRÍTICO: Para agendamiento, la pausa ya se estableció en el handler
+        console.log(`[TOOL_FLOW] Agendamiento completado. Pausa ya establecida por el handler.`);
       }
 
     } catch (err) {
@@ -817,6 +823,12 @@ app.ws("/realtime-ws", (clientWs) => {
   }
 
   async function streamFollowUpAfterTool(wasSuccessful = false, toolName = "", actionPerformed = "") {
+    // 🚨 CRÍTICO: Para agendamiento NO generar follow-up, igual que OpenAI
+    if (toolName === "abrir_modal_agendamiento") {
+      console.log(`[TOOL_FLOW] Agendamiento ejecutado. No se genera follow-up (backend pausado).`);
+      return;
+    }
+
     let followText = "";
     try {
       // Si la herramienta fue exitosa, agregar contexto de confirmación
@@ -1041,6 +1053,9 @@ app.ws("/realtime-ws", (clientWs) => {
 
                   if (clientWs && clientWs.readyState === WS_OPEN) {
                     safeSend(clientWs, { type: 'schedule_appointment_action', url: finalUrl });
+                    // 🚨 CRÍTICO: Establecer pausa EXACTAMENTE como en OpenAI
+                    isPausedForUserAction = true;
+                    console.log(`[TOOL_FLOW] Pausa iniciada para agendamiento. Backend espera.`);
                     return { status: "success", message: "Modal de agendamiento solicitado." };
                   }
 

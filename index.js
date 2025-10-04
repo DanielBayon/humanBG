@@ -1214,7 +1214,7 @@ app.ws("/realtime-ws", (clientWs) => {
                     });
                     const fechaLegible = startDate ? esES_Madrid.format(startDate) : null;
 
-                    const systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito.${fechaLegible ? ` Detalles: "${title}" para el ${fechaLegible}.` : ""}\n1) Confirma verbalmente la cita${fechaLegible ? " mencionando día y hora" : ""}.\n2) Indica que recibirá un email del sistema con el enlace a Google Meet para la videoconferencia y que le permite añadir la cita a su calendario.\n3) Pregunta si quiere que le envíes tú un correo con los detalles de la cita y algo más de información que le pueda interesar.`;
+                    const systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito.${fechaLegible ? ` Detalles: "${title}" para el ${fechaLegible}.` : ""}\n1) Confirma verbalmente la cita${fechaLegible ? " mencionando día y hora" : ""}.\n2) Indica que recibirá un email del sistema con el enlace a Google Meet para la videoconferencia y que le permite añadir la cita a su calendario.\n3) Pregunta si necesita algo más.`;
 
                     await geminiChat.sendMessage([{
                       text: systemText
@@ -1287,12 +1287,45 @@ app.ws("/realtime-ws", (clientWs) => {
               if (bookingEventSnap.exists) {
                 console.log(`[RESUME] ¡Reserva encontrada para ${conversationId}!`);
                 const bookingData = bookingEventSnap.data();
-
-                const formattedDate = new Date(bookingData.startTime).toLocaleString('es-ES', { dateStyle: 'full', timeStyle: 'short' });
-                systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito. Los detalles son: "${bookingData.title}" para el ${formattedDate}.
+                
+                // CAMBIO CRÍTICO: Verificar que tenemos startTime y formatearlo correctamente
+                console.log(`[RESUME] Datos de la reserva:`, JSON.stringify(bookingData, null, 2));
+                
+                if (bookingData.startTime) {
+                  // Convertir Firestore Timestamp a Date si es necesario
+                  let startDate;
+                  if (bookingData.startTime.toDate) {
+                    // Es un Firestore Timestamp
+                    startDate = bookingData.startTime.toDate();
+                  } else if (typeof bookingData.startTime === 'string') {
+                    // Es una string ISO
+                    startDate = new Date(bookingData.startTime);
+                  } else {
+                    // Asumir que ya es un Date
+                    startDate = new Date(bookingData.startTime);
+                  }
+                  
+                  const formattedDate = startDate.toLocaleString('es-ES', { 
+                    dateStyle: 'full', 
+                    timeStyle: 'short',
+                    timeZone: 'Europe/Madrid'
+                  });
+                  
+                  const title = bookingData.title || "Tu cita";
+                  
+                  systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito. Los detalles son: "${title}" para el ${formattedDate}.
 1) Confirma verbalmente la cita mencionando día y hora.
-2) Indica que recibirá un email con los detalles.
+2) Indica que recibirá un email del sistema con el enlace a Google Meet para la videoconferencia y que le permite añadir la cita a su calendario.
 3) Pregunta si necesita algo más.`;
+                  
+                  console.log(`[RESUME] Mensaje de confirmación preparado: ${systemText}`);
+                } else {
+                  console.warn(`[RESUME] Reserva encontrada pero sin startTime válido:`, bookingData);
+                  systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito.
+1) Confirma verbalmente la cita.
+2) Indica que recibirá un email del sistema con los detalles.
+3) Pregunta si necesita algo más.`;
+                }
 
                 await bookingEventRef.delete();
                 console.log(`[DB OK] Evento de reserva procesado y eliminado para ${conversationId}.`);
@@ -1306,7 +1339,8 @@ app.ws("/realtime-ws", (clientWs) => {
             }
           }
 
-          // Inyectar y responder
+          // Inyectar y responder CON GEMINI (no OpenAI)
+          console.log(`[RESUME] Enviando mensaje de sistema a Gemini: ${systemText}`);
           await geminiChat.sendMessage([{
             text: systemText
           }]);

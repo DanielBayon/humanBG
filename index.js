@@ -861,7 +861,7 @@ app.ws("/realtime-ws", (clientWs) => {
       }
       
       // Fin del stream post-tool → usar commitAssistantFinal para consistencia
-      await commitAssistantFinal(followText, { supervise: false });
+      await commitAssistantFinal(followText, { supervise: true });
     } catch (error) {
       console.error("[GEMINI FOLLOW ERROR]", error);
       safeSend(clientWs, { type: "error", message: `Error en seguimiento post-tool: ${error.message}` });

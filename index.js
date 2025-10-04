@@ -733,31 +733,33 @@ app.ws("/realtime-ws", (clientWs) => {
       console.log(`[TOOL EXECUTION] Resultado de ${name}:`, JSON.stringify(result, null, 2));
       safeSend(clientWs, { type: "tool_execution_end", toolName: name, success: result?.status === "success" });
 
-      // Entregar la salida de la herramienta al modelo (functionResponse)
-      await sendFunctionResponseToGemini(name, result);
-
-      // NUEVO: Manejo especial para status "success"
+      // NUEVO: Modificar el resultado para herramientas exitosas antes de enviarlo a Gemini
+      let resultToSend = result;
+      console.log(`[TOOL DEBUG] Verificando status de resultado: ${result?.status}`);
       if (result?.status === "success") {
-        console.log(`[TOOL SUCCESS] La herramienta ${name} fue ejecutada exitosamente, enviando mensaje de sistema de confirmación.`);
+        console.log(`[TOOL SUCCESS] La herramienta ${name} fue ejecutada exitosamente, modificando respuesta para incluir confirmación.`);
         
-        // Construir mensaje de sistema según la herramienta ejecutada
         const orden = args.orden || "la acción solicitada";
-        const approvalMessage = `INSTRUCCIÓN DE SISTEMA: La acción que acabas de ejecutar ha sido COMPLETADA exitosamente. 
+        resultToSend = {
+          ...result,
+          message: `HERRAMIENTA COMPLETADA EXITOSAMENTE. 
 
 Acción ejecutada: "${orden}"
 
-Debes:
-1. Confirmar al usuario que la acción se ha completado con éxito
-2. Ser específico sobre lo que se realizó (ejemplo: "Ya le hemos enviado el email", "Su solicitud ha sido registrada", "Los datos han sido guardados", etc.)
-3. Continuar la conversación de manera natural según tus instrucciones y contexto en ese momento
+INSTRUCCIONES PARA TU RESPUESTA:
+1. Confirma al usuario que la acción se ha completado con éxito
+2. Sé específico sobre lo que se realizó (ejemplo: "Ya le hemos enviado el email", "Su solicitud ha sido registrada", "Los datos han sido guardados", etc.)
+3. Continúa la conversación de manera natural según tus instrucciones y contexto en ese momento
 
-NO menciones términos técnicos como "herramienta", "sistema", "webhook" o "aprobado". Comunícate de forma natural y centrada en el usuario.`;
-
-        // Enviar mensaje de sistema a Gemini
-        await geminiChat.sendMessage([{
-          text: approvalMessage
-        }]);
+NO menciones términos técnicos como "herramienta", "sistema", "webhook". Comunícate de forma natural y centrada en el usuario.`
+        };
+        console.log(`[TOOL SUCCESS] Resultado modificado con instrucciones de confirmación.`);
+      } else {
+        console.log(`[TOOL DEBUG] Status no es 'success', es: ${result?.status}. Se enviará resultado original.`);
       }
+
+      // Entregar la salida de la herramienta al modelo (functionResponse)
+      await sendFunctionResponseToGemini(name, resultToSend);
 
       // Actualizar transcript con ejecución de herramienta
       const toolExecutionString = `\nEjecución De Herramienta Por Parte Del Agente: ${name}(${JSON.stringify(args)}) - Resultado: ${result?.status || 'unknown'}`;

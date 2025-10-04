@@ -736,8 +736,31 @@ app.ws("/realtime-ws", (clientWs) => {
       // Entregar la salida de la herramienta al modelo (functionResponse)
       await sendFunctionResponseToGemini(name, result);
 
+      // NUEVO: Manejo especial para status "approved"
+      if (result?.status === "approved") {
+        console.log(`[TOOL APPROVED] La herramienta ${name} fue aprobada, enviando mensaje de sistema de confirmación.`);
+        
+        // Construir mensaje de sistema según la herramienta ejecutada
+        const orden = args.orden || "la acción solicitada";
+        const approvalMessage = `INSTRUCCIÓN DE SISTEMA: La acción que acabas de ejecutar ha sido APROBADA y completada exitosamente. 
+
+Acción ejecutada: "${orden}"
+
+Debes:
+1. Confirmar al usuario que la acción se ha completado con éxito
+2. Ser específico sobre lo que se realizó (ejemplo: "Ya le hemos enviado el email", "Su solicitud ha sido registrada", "Los datos han sido guardados", etc.)
+3. Continuar la conversación de manera natural según tus instrucciones y contexto en ese momento
+
+NO menciones términos técnicos como "herramienta", "sistema", "webhook" o "aprobado". Comunícate de forma natural y centrada en el usuario.`;
+
+        // Enviar mensaje de sistema a Gemini
+        await geminiChat.sendMessage([{
+          text: approvalMessage
+        }]);
+      }
+
       // Actualizar transcript con ejecución de herramienta
-      const toolExecutionString = `\nEjecución De Herramienta Por Parte Del Agente: ${name}(${JSON.stringify(args)})`;
+      const toolExecutionString = `\nEjecución De Herramienta Por Parte Del Agente: ${name}(${JSON.stringify(args)}) - Resultado: ${result?.status || 'unknown'}`;
       fullConversationTranscript += toolExecutionString;
 
       if (conversationId && conversationCreated) {
@@ -861,7 +884,7 @@ app.ws("/realtime-ws", (clientWs) => {
       }
       
       // Fin del stream post-tool → usar commitAssistantFinal para consistencia
-      await commitAssistantFinal(followText, { supervise: true });
+      await commitAssistantFinal(followText, { supervise: false });
     } catch (error) {
       console.error("[GEMINI FOLLOW ERROR]", error);
       safeSend(clientWs, { type: "error", message: `Error en seguimiento post-tool: ${error.message}` });

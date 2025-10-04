@@ -510,6 +510,53 @@ app.ws("/realtime-ws", (clientWs) => {
     console.log(`[STT] Stream iniciado con ${sttLanguageCode} (latest_long, 24kHz, interims).`);
   };
 
+  // Helper para enviar assistant_final y persistir transcript
+  async function commitAssistantFinal(text, { supervise = true } = {}) {
+    const final = (text || "").trim();
+    if (!final) return;
+
+    // Emitir al cliente
+    safeSend(clientWs, { type: "assistant_final", text: final });
+
+    // Persistencia en transcript
+    fullConversationTranscript += `\nAI-BOT: ${final}`;
+    try {
+      if (conversationId && conversationCreated) {
+        await adminDb
+          .collection("Conversations")
+          .doc(conversationId)
+          .update({
+            BotTranscripcion: fullConversationTranscript,
+            Timestamp: admin.firestore.Timestamp.now(),
+          });
+      }
+    } catch (e) {
+      console.warn("[DB WARN] No se pudo guardar transcript:", e.message);
+    }
+
+    // Supervisión opcional
+    if (supervise && isSupervised && !isCorrecting) {
+      triggerSupervisorWorkflow(
+        {
+          botId: currentBotId,
+          conversationId,
+          fullConversation: fullConversationTranscript,
+          currentTurn: {
+            userInput: currentUserTranscript,
+            userInputSource: currentUserInputSource,
+            botResponse: final,
+            toolCall: null,
+          },
+        },
+        currentSupervisorWebhook
+      );
+    }
+
+    // Limpieza de flags de turno de usuario
+    currentUserTranscript = "";
+    isCorrecting = false;
+  }
+
   async function onSpeechData(data) {
     try {
       const result = data.results?.[0];
@@ -600,6 +647,15 @@ app.ws("/realtime-ws", (clientWs) => {
             // pero mantenemos política de "una por turno"
             if (part && part.functionCall && !toolAlreadyHandledThisTurn) {
               toolAlreadyHandledThisTurn = true;
+
+              // ✅ CLAVE: cerrar el texto acumulado ANTES de ejecutar la tool
+              if (fullText.trim()) {
+                // No supervisamos este cierre pre-tool para evitar duplicación
+                // ya que la herramienta será reportada por separado
+                await commitAssistantFinal(fullText, { supervise: false });
+                fullText = ""; // Limpiar para evitar reutilización
+              }
+
               const fc = part.functionCall;
               console.log("[GEMINI] Function call detectada:", JSON.stringify(fc, null, 2));
               
@@ -607,47 +663,15 @@ app.ws("/realtime-ws", (clientWs) => {
               // aparecerían como parts adicionales con functionCall
               // Por política actual, procesamos solo la primera
               await handleFunctionCall(fc);
+              // Retornar aquí es correcto - la lógica post-tool está en handleFunctionCall
               return;
             }
           }
         }
       }
 
-      // Fin del stream de texto puro
-      const final = (fullText || "").trim();
-      if (final) {
-        safeSend(clientWs, { type: "assistant_final", text: final });
-
-        // Transcripción/memoria
-        fullConversationTranscript += `\nAI-BOT: ${final}`;
-        try {
-          if (conversationId && conversationCreated) {
-            await adminDb.collection("Conversations").doc(conversationId)
-              .update({ BotTranscripcion: fullConversationTranscript, Timestamp: admin.firestore.Timestamp.now() });
-          }
-        } catch (e) {
-          console.warn("[DB WARN] No se pudo guardar transcript:", e.message);
-        }
-
-        // Supervisión (texto puro)
-        if (isSupervised && !isCorrecting) {
-          triggerSupervisorWorkflow({
-            botId: currentBotId,
-            conversationId,
-            fullConversation: fullConversationTranscript,
-            currentTurn: {
-              userInput: currentUserTranscript,
-              userInputSource: currentUserInputSource,
-              botResponse: final,
-              toolCall: null
-            }
-          }, currentSupervisorWebhook);
-        }
-        
-        // Limpieza para siguiente turno
-        currentUserTranscript = "";
-        isCorrecting = false;
-      }
+      // Fin del stream sin tools → cierre normal con supervisión
+      await commitAssistantFinal(fullText, { supervise: true });
     } catch (error) {
       console.error("[GEMINI API ERROR]", error);
       safeSend(clientWs, { type: "error", message: `Error en la API de Gemini: ${error.message}` });
@@ -836,19 +860,8 @@ app.ws("/realtime-ws", (clientWs) => {
         }
       }
       
-      const final = (followText || "").trim();
-      if (final) {
-        safeSend(clientWs, { type: "assistant_final", text: final });
-        fullConversationTranscript += `\nAI-BOT: ${final}`;
-        try {
-          if (conversationId && conversationCreated) {
-            await adminDb.collection("Conversations").doc(conversationId)
-              .update({ BotTranscripcion: fullConversationTranscript, Timestamp: admin.firestore.Timestamp.now() });
-          }
-        } catch (e) {
-          console.warn("[DB WARN] No se pudo guardar transcript post-tool:", e.message);
-        }
-      }
+      // Fin del stream post-tool → usar commitAssistantFinal para consistencia
+      await commitAssistantFinal(followText, { supervise: false });
     } catch (error) {
       console.error("[GEMINI FOLLOW ERROR]", error);
       safeSend(clientWs, { type: "error", message: `Error en seguimiento post-tool: ${error.message}` });

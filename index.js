@@ -733,33 +733,8 @@ app.ws("/realtime-ws", (clientWs) => {
       console.log(`[TOOL EXECUTION] Resultado de ${name}:`, JSON.stringify(result, null, 2));
       safeSend(clientWs, { type: "tool_execution_end", toolName: name, success: result?.status === "success" });
 
-      // NUEVO: Modificar el resultado para herramientas exitosas antes de enviarlo a Gemini
-      let resultToSend = result;
-      console.log(`[TOOL DEBUG] Verificando status de resultado: ${result?.status}`);
-      if (result?.status === "success") {
-        console.log(`[TOOL SUCCESS] La herramienta ${name} fue ejecutada exitosamente, modificando respuesta para incluir confirmación.`);
-        
-        const orden = args.orden || "la acción solicitada";
-        resultToSend = {
-          ...result,
-          message: `HERRAMIENTA COMPLETADA EXITOSAMENTE. 
-
-Acción ejecutada: "${orden}"
-
-INSTRUCCIONES PARA TU RESPUESTA:
-1. Confirma al usuario que la acción se ha completado con éxito
-2. Sé específico sobre lo que se realizó (ejemplo: "Ya le hemos enviado el email", "Su solicitud ha sido registrada", "Los datos han sido guardados", etc.)
-3. Continúa la conversación de manera natural según tus instrucciones y contexto en ese momento
-
-NO menciones términos técnicos como "herramienta", "sistema", "webhook". Comunícate de forma natural y centrada en el usuario.`
-        };
-        console.log(`[TOOL SUCCESS] Resultado modificado con instrucciones de confirmación.`);
-      } else {
-        console.log(`[TOOL DEBUG] Status no es 'success', es: ${result?.status}. Se enviará resultado original.`);
-      }
-
       // Entregar la salida de la herramienta al modelo (functionResponse)
-      await sendFunctionResponseToGemini(name, resultToSend);
+      await sendFunctionResponseToGemini(name, result);
 
       // Actualizar transcript con ejecución de herramienta
       const toolExecutionString = `\nEjecución De Herramienta Por Parte Del Agente: ${name}(${JSON.stringify(args)}) - Resultado: ${result?.status || 'unknown'}`;
@@ -792,7 +767,8 @@ NO menciones términos técnicos como "herramienta", "sistema", "webhook". Comun
 
       // Solo para herramientas que NO son de agendamiento, generar réplica post-tool
       if (name !== "abrir_modal_agendamiento") {
-        await streamFollowUpAfterTool();
+        // Pasar información sobre el éxito de la herramienta
+        await streamFollowUpAfterTool(result?.status === "success", name, args.orden);
       } else {
         console.log(`[TOOL_FLOW] Pausa iniciada para agendamiento. Backend espera.`);
         isPausedForUserAction = true;
@@ -840,10 +816,17 @@ NO menciones términos técnicos como "herramienta", "sistema", "webhook". Comun
     }
   }
 
-  async function streamFollowUpAfterTool() {
+  async function streamFollowUpAfterTool(wasSuccessful = false, toolName = "", actionPerformed = "") {
     let followText = "";
     try {
-      const follow = await geminiChat.sendMessageStream(""); // trigger del turno post-herramienta
+      // Si la herramienta fue exitosa, agregar contexto de confirmación
+      let promptMessage = "";
+      if (wasSuccessful && actionPerformed) {
+        promptMessage = `La acción "${actionPerformed}" se ha completado exitosamente. Confirma al usuario que se realizó correctamente y continúa la conversación naturalmente.`;
+        console.log(`[GEMINI FOLLOW] Enviando contexto de éxito: ${promptMessage}`);
+      }
+      
+      const follow = await geminiChat.sendMessageStream(promptMessage); // trigger del turno post-herramienta
       
       for await (const chunk of follow.stream) {
         // Verificar que chunk existe y tiene candidates

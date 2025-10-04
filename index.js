@@ -92,7 +92,7 @@ try {
 
   vertexAI = new VertexAI({
     project: process.env.GOOGLE_PROJECT_ID || "botgpt-a284d",
-    location: process.env.GOOGLE_LOCATION || "europe-southwest1",
+    location: process.env.GOOGLE_LOCATION || "us-central1",
   });
   
   // Verificar que el modelo esté disponible

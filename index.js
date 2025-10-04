@@ -1143,31 +1143,92 @@ app.ws("/realtime-ws", (clientWs) => {
               console.log(`[DB] Conversación creada: ${conversationId}`);
 
               // Registrar conexión para correcciones
+              // === Estado de deduplicación de reservas por conexión ===
+              let lastBookingIdProcessed = null;
+              let lastBookingStartISO = null;
+              let bookingAnnouncedTs = 0;
+
               activeConnections.set(conversationId, {
                 applyCorrection: (msg) => applyCorrection(msg),
                 resumeWithBookingData: async (eventDetails) => {
-                  // Implementación del manejo de booking data cuando viene del webhook
-                  if (isPausedForUserAction) {
-                    isPausedForUserAction = false;
-                    console.log("✅ [BOOKING] Conversación reanudada (estaba en pausa).");
+                  try {
+                    console.log("🗓️ [BOOKING] Webhook Cal.com recibido → procesar");
+
+                    const bookingId =
+                      eventDetails?.id ||
+                      eventDetails?.uid ||
+                      eventDetails?.bookingId ||
+                      eventDetails?.booking?.id ||
+                      null;
+
+                    const rawStartISO = eventDetails?.startTime || eventDetails?.start?.time || null;
+                    const startISO = rawStartISO ? String(rawStartISO) : null;
+
+                    // Ventanas de deduplicación
+                    const now = Date.now();
+                    const NEAR_WINDOW_MS = 5 * 60 * 1000; // ±5 minutos
+                    const ANTI_DUP_MS = 10 * 1000;        // 10 segundos
+
+                    if (bookingId && lastBookingIdProcessed && bookingId === lastBookingIdProcessed) {
+                      console.log("🔁 [BOOKING] Duplicado por bookingId. Ignorado.");
+                      return;
+                    }
+                    if (!bookingId && startISO && lastBookingStartISO) {
+                      const t1 = new Date(startISO).getTime();
+                      const t2 = new Date(lastBookingStartISO).getTime();
+                      if (Math.abs(t1 - t2) <= NEAR_WINDOW_MS && (now - bookingAnnouncedTs) < ANTI_DUP_MS) {
+                        console.log("🔁 [BOOKING] Duplicado por ventana temporal (sin id). Ignorado.");
+                        return;
+                      }
+                    }
+
+                    // Notificar al frontend (idempotente)
+                    if (clientWs && clientWs.readyState === 1) {
+                      safeSend(clientWs, {
+                        type: "booking_completed",
+                        details: {
+                          startTime:   startISO,
+                          endTime:     eventDetails?.endTime   || eventDetails?.end?.time   || null,
+                          title:       eventDetails?.title || eventDetails?.eventType?.title || "Tu cita",
+                          inviteeName: eventDetails?.attendees?.[0]?.name  || eventDetails?.name  || "",
+                          inviteeEmail:eventDetails?.attendees?.[0]?.email || eventDetails?.email || "",
+                          timeZone:    eventDetails?.timeZone || eventDetails?.attendees?.[0]?.timeZone || "Europe/Madrid"
+                        }
+                      });
+                    }
+
+                    // ⬅️ CAMBIO CRÍTICO: despausar ANTES de enviar a Gemini
+                    if (isPausedForUserAction) {
+                      isPausedForUserAction = false;
+                      console.log("✅ [BOOKING] Conversación reanudada (estaba en pausa).");
+                    } else {
+                      console.log("ℹ️ [BOOKING] Conversación ya despausada; anuncio idempotente enviado.");
+                    }
+
+                    const title = eventDetails?.title || eventDetails?.eventType?.title || "Tu cita";
+                    const startDate = startISO ? new Date(startISO) : null;
+                    const esES_Madrid = new Intl.DateTimeFormat('es-ES', {
+                      timeZone: 'Europe/Madrid',
+                      dateStyle: 'full',
+                      timeStyle: 'short'
+                    });
+                    const fechaLegible = startDate ? esES_Madrid.format(startDate) : null;
+
+                    const systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito.${fechaLegible ? ` Detalles: "${title}" para el ${fechaLegible}.` : ""}\n1) Confirma verbalmente la cita${fechaLegible ? " mencionando día y hora" : ""}.\n2) Indica que recibirá un email del sistema con el enlace a Google Meet para la videoconferencia y que le permite añadir la cita a su calendario.\n3) Pregunta si quiere que le envíes tú un correo con los detalles de la cita y algo más de información que le pueda interesar.`;
+
+                    await geminiChat.sendMessage([{
+                      text: systemText
+                    }]);
+                    await getGeminiResponse("");
+
+                    if (bookingId) lastBookingIdProcessed = bookingId;
+                    if (startISO) lastBookingStartISO = startISO;
+                    bookingAnnouncedTs = now;
+
+                    console.log(`[BOOKING] Anunciado booking ${bookingId || "(sin id)"} inicio ${startISO || "(desconocido)"}.`);
+                  } catch (err) {
+                    console.error("[RESUME ERROR]", err);
                   }
-
-                  const title = eventDetails?.title || eventDetails?.eventType?.title || "Tu cita";
-                  const startISO = eventDetails?.startTime || eventDetails?.start?.time || null;
-                  const startDate = startISO ? new Date(startISO) : null;
-                  const esES_Madrid = new Intl.DateTimeFormat('es-ES', {
-                    timeZone: 'Europe/Madrid',
-                    dateStyle: 'full',
-                    timeStyle: 'short'
-                  });
-                  const fechaLegible = startDate ? esES_Madrid.format(startDate) : null;
-
-                  const systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito.${fechaLegible ? ` Detalles: "${title}" para el ${fechaLegible}.` : ""}\n1) Confirma verbalmente la cita${fechaLegible ? " mencionando día y hora" : ""}.\n2) Indica que recibirá un email del sistema con el enlace a Google Meet para la videoconferencia y que le permite añadir la cita a su calendario.\n3) Pregunta si quiere que le envíes tú un correo con los detalles de la cita y algo más de información que le pueda interesar.`;
-
-                  await geminiChat.sendMessage([{
-                    text: systemText
-                  }]);
-                  await getGeminiResponse("");
                 }
               });
               console.log(`[CONN_MAP] Conexión para ${conversationId} registrada.`);

@@ -1359,7 +1359,40 @@ app.ws("/realtime-ws", (clientWs) => {
           await geminiChat.sendMessage([{
             text: systemText
           }]);
-          await getGeminiResponse("");
+          console.log(`[DEBUG] Mensaje de sistema enviado. Ahora generando respuesta automática...`);
+
+          // CAMBIO CRÍTICO: Generar respuesta automática sin input de usuario
+          // Similar a como funciona streamFollowUpAfterTool para otras herramientas
+          try {
+            const result = await geminiChat.sendMessageStream(""); // Stream vacío para trigger automático
+            
+            let fullText = "";
+            for await (const chunk of result.stream) {
+              if (!chunk || typeof chunk !== 'object') continue;
+
+              const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
+              
+              for (const cand of candidates) {
+                if (!cand || !cand.content || !Array.isArray(cand.content.parts)) continue;
+
+                const parts = cand.content.parts;
+                
+                for (const part of parts) {
+                  if (part && typeof part.text === "string" && part.text.length > 0) {
+                    fullText += part.text;
+                    safeSend(clientWs, { type: "assistant_delta", delta: part.text });
+                  }
+                }
+              }
+            }
+            
+            // Confirmar respuesta final
+            await commitAssistantFinal(fullText, { supervise: false });
+            console.log(`[DEBUG] Respuesta automática de agendamiento completada.`);
+          } catch (error) {
+            console.error("[RESUME ERROR] Error generando respuesta automática:", error);
+          }
+
           break;
         }
 

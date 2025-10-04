@@ -736,13 +736,13 @@ app.ws("/realtime-ws", (clientWs) => {
       // Entregar la salida de la herramienta al modelo (functionResponse)
       await sendFunctionResponseToGemini(name, result);
 
-      // NUEVO: Manejo especial para status "approved"
-      if (result?.status === "approved") {
-        console.log(`[TOOL APPROVED] La herramienta ${name} fue aprobada, enviando mensaje de sistema de confirmación.`);
+      // NUEVO: Manejo especial para status "success"
+      if (result?.status === "success") {
+        console.log(`[TOOL SUCCESS] La herramienta ${name} fue ejecutada exitosamente, enviando mensaje de sistema de confirmación.`);
         
         // Construir mensaje de sistema según la herramienta ejecutada
         const orden = args.orden || "la acción solicitada";
-        const approvalMessage = `INSTRUCCIÓN DE SISTEMA: La acción que acabas de ejecutar ha sido APROBADA y completada exitosamente. 
+        const approvalMessage = `INSTRUCCIÓN DE SISTEMA: La acción que acabas de ejecutar ha sido COMPLETADA exitosamente. 
 
 Acción ejecutada: "${orden}"
 

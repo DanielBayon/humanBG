@@ -1210,6 +1210,9 @@ app.ws("/realtime-ws", (clientWs) => {
                           timeZone:    eventDetails?.timeZone || eventDetails?.attendees?.[0]?.timeZone || "Europe/Madrid"
                         }
                       });
+                      console.log(`[BOOKING] ✅ Evento booking_completed enviado al frontend para cerrar modal.`);
+                    } else {
+                      console.error(`[BOOKING] ❌ No se pudo enviar booking_completed - WebSocket no disponible`);
                     }
 
                     // ⬅️ CAMBIO CRÍTICO: despausar ANTES de enviar a Gemini
@@ -1266,8 +1269,15 @@ app.ws("/realtime-ws", (clientWs) => {
 
         case "user_action_completed": {
           console.log(`[DEBUG] Recibido user_action_completed. isPausedForUserAction: ${isPausedForUserAction}`);
+          console.log(`[DEBUG] WebSocket readyState: ${clientWs?.readyState}, WS_OPEN: ${WS_OPEN}`);
           if (!isPausedForUserAction) {
             console.log("⚠️ Recibido user_action_completed pero no estaba pausado para acción de usuario. IGNORANDO completamente.");
+            // AÑADIR: Enviar evento para cerrar modal aunque no estemos pausados
+            safeSend(clientWs, {
+              type: "booking_completed", 
+              details: { canceled: true }
+            });
+            console.log(`[DEBUG] ✅ Evento booking_completed (cancelado) enviado para cerrar modal.`);
             break;
           }
 

@@ -457,6 +457,11 @@ app.ws("/realtime-ws", (clientWs) => {
   let currentUserInputSource = "voice";
   let isCorrecting = false;
   
+  // Estado de deduplicación de reservas por conexión
+  let lastBookingIdProcessed = null;
+  let lastBookingStartISO = null;
+  let bookingAnnouncedTs = 0;
+  
   // Webhooks específicos del bot
   let currentN8nWebhook = "";
   let currentSupervisorWebhook = "";
@@ -1158,11 +1163,6 @@ app.ws("/realtime-ws", (clientWs) => {
               console.log(`[DB] Conversación creada: ${conversationId}`);
 
               // Registrar conexión para correcciones
-              // === Estado de deduplicación de reservas por conexión ===
-              let lastBookingIdProcessed = null;
-              let lastBookingStartISO = null;
-              let bookingAnnouncedTs = 0;
-
               activeConnections.set(conversationId, {
                 applyCorrection: (msg) => applyCorrection(msg),
                 resumeWithBookingData: async (eventDetails) => {
@@ -1207,7 +1207,8 @@ app.ws("/realtime-ws", (clientWs) => {
                           title:       eventDetails?.title || eventDetails?.eventType?.title || "Tu cita",
                           inviteeName: eventDetails?.attendees?.[0]?.name  || eventDetails?.name  || "",
                           inviteeEmail:eventDetails?.attendees?.[0]?.email || eventDetails?.email || "",
-                          timeZone:    eventDetails?.timeZone || eventDetails?.attendees?.[0]?.timeZone || "Europe/Madrid"
+                          timeZone:    eventDetails?.timeZone || eventDetails?.attendees?.[0]?.timeZone || "Europe/Madrid",
+                          processedByWebhook: true // Flag para indicar que fue procesado por webhook
                         }
                       });
                       console.log(`[BOOKING] ✅ Evento booking_completed enviado al frontend para cerrar modal.`);
@@ -1300,15 +1301,26 @@ app.ws("/realtime-ws", (clientWs) => {
         case "user_action_completed": {
           console.log(`[DEBUG] Recibido user_action_completed. isPausedForUserAction: ${isPausedForUserAction}`);
           console.log(`[DEBUG] WebSocket readyState: ${clientWs?.readyState}, WS_OPEN: ${WS_OPEN}`);
+          console.log(`[DEBUG] appointmentData en mensaje:`, JSON.stringify(msg.appointmentData, null, 2));
+          
           if (!isPausedForUserAction) {
-            console.log("⚠️ Recibido user_action_completed pero no estaba pausado para acción de usuario. IGNORANDO completamente.");
-            // AÑADIR: Enviar evento para cerrar modal aunque no estemos pausados
-            safeSend(clientWs, {
-              type: "booking_completed", 
-              details: { canceled: true }
-            });
-            console.log(`[DEBUG] ✅ Evento booking_completed (cancelado) enviado para cerrar modal.`);
-            break;
+            console.log("⚠️ Recibido user_action_completed pero no estaba pausado para acción de usuario.");
+            
+            // Si tenemos datos de appointment en el mensaje, podría ser un caso válido
+            // donde el webhook procesó primero pero el frontend no se enteró
+            if (msg.appointmentData && (msg.appointmentData.startTime || msg.appointmentData.start?.time)) {
+              console.log("📅 Pero tenemos appointmentData válida. Procesando como confirmación de reserva...");
+              // Continuar con el procesamiento normal
+            } else {
+              console.log("❌ Y no hay appointmentData válida. IGNORANDO completamente.");
+              // AÑADIR: Enviar evento para cerrar modal aunque no estemos pausados
+              safeSend(clientWs, {
+                type: "booking_completed", 
+                details: { canceled: true }
+              });
+              console.log(`[DEBUG] ✅ Evento booking_completed (cancelado) enviado para cerrar modal.`);
+              break;
+            }
           }
 
           isPausedForUserAction = false;
@@ -1318,6 +1330,41 @@ app.ws("/realtime-ws", (clientWs) => {
           // PRIORIDAD 1: si el front nos manda appointmentData, úsalo y listo (idempotente)
           if (msg.appointmentData && (msg.appointmentData.startTime || (msg.appointmentData.start && msg.appointmentData.start.time))) {
             const startISO = msg.appointmentData.startTime || msg.appointmentData.start?.time || null;
+            const bookingId = msg.appointmentData.id || msg.appointmentData.uid || msg.appointmentData.bookingId || null;
+            
+            // Verificar deduplicación usando las mismas variables que el webhook
+            const now = Date.now();
+            const NEAR_WINDOW_MS = 5 * 60 * 1000; // ±5 minutos
+            const ANTI_DUP_MS = 10 * 1000;        // 10 segundos
+            
+            if (bookingId && lastBookingIdProcessed && bookingId === lastBookingIdProcessed) {
+              console.log("🔁 [USER_ACTION] Duplicado por bookingId detectado. Ya fue procesado por webhook.");
+              // Solo enviar confirmación al frontend pero no generar nueva respuesta
+              safeSend(clientWs, {
+                type: "booking_completed",
+                details: { alreadyProcessed: true }
+              });
+              break;
+            }
+            
+            if (!bookingId && startISO && lastBookingStartISO) {
+              const t1 = new Date(startISO).getTime();
+              const t2 = new Date(lastBookingStartISO).getTime();
+              if (Math.abs(t1 - t2) <= NEAR_WINDOW_MS && (now - bookingAnnouncedTs) < ANTI_DUP_MS) {
+                console.log("🔁 [USER_ACTION] Duplicado por timing detectado. Ya fue procesado por webhook.");
+                safeSend(clientWs, {
+                  type: "booking_completed",
+                  details: { alreadyProcessed: true }
+                });
+                break;
+              }
+            }
+            
+            // Actualizar variables de deduplicación
+            if (bookingId) lastBookingIdProcessed = bookingId;
+            if (startISO) lastBookingStartISO = startISO;
+            bookingAnnouncedTs = now;
+            
             const title = msg.appointmentData.eventName || msg.appointmentData.title || "Tu cita";
             const fechaLegible = startISO
               ? new Date(startISO).toLocaleString('es-ES', { dateStyle: 'full', timeStyle: 'short' })

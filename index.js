@@ -1197,7 +1197,7 @@ app.ws("/realtime-ws", (clientWs) => {
                       }
                     }
 
-                    // Notificar al frontend (idempotente)
+                    // Notificar al frontend PRIMERO para cerrar modal
                     if (clientWs && clientWs.readyState === 1) {
                       safeSend(clientWs, {
                         type: "booking_completed",
@@ -1232,12 +1232,42 @@ app.ws("/realtime-ws", (clientWs) => {
                     });
                     const fechaLegible = startDate ? esES_Madrid.format(startDate) : null;
 
-                    const systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito.${fechaLegible ? ` Detalles: "${title}" para el ${fechaLegible}.` : ""}\n1) Confirma verbalmente la cita${fechaLegible ? " mencionando día y hora" : ""}.\n2) Indica que recibirá un email del sistema con el enlace a Google Meet para la videoconferencia y que le permite añadir la cita a su calendario.\n3) Pregunta si necesita algo más.`;
+                    const systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito.${fechaLegible ? ` Los detalles son: "${title}" para el ${fechaLegible}.` : ""}\n1) Confirma verbalmente la cita${fechaLegible ? " mencionando día y hora" : ""}.\n2) Indica que recibirá un email del sistema con el enlace a Google Meet para la videoconferencia y que le permite añadir la cita a su calendario.\n3) Pregunta si necesita algo más.`;
 
+                    console.log(`[BOOKING] 📝 Enviando mensaje de sistema a Gemini: ${systemText}`);
+                    
+                    // CAMBIO CRÍTICO: Generar la respuesta completa aquí directamente
                     await geminiChat.sendMessage([{
                       text: systemText
                     }]);
-                    await getGeminiResponse("");
+                    
+                    // Generar respuesta automática inmediatamente
+                    console.log(`[BOOKING] 🤖 Generando respuesta automática...`);
+                    const result = await geminiChat.sendMessageStream(""); // Stream vacío para trigger automático
+                    
+                    let fullText = "";
+                    for await (const chunk of result.stream) {
+                      if (!chunk || typeof chunk !== 'object') continue;
+
+                      const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
+                      
+                      for (const cand of candidates) {
+                        if (!cand || !cand.content || !Array.isArray(cand.content.parts)) continue;
+
+                        const parts = cand.content.parts;
+                        
+                        for (const part of parts) {
+                          if (part && typeof part.text === "string" && part.text.length > 0) {
+                            fullText += part.text;
+                            safeSend(clientWs, { type: "assistant_delta", delta: part.text });
+                          }
+                        }
+                      }
+                    }
+                    
+                    // Confirmar respuesta final con supervisión
+                    await commitAssistantFinal(fullText, { supervise: true });
+                    console.log(`[BOOKING] ✅ Respuesta automática completada: "${fullText.substring(0, 100)}..."`);
 
                     if (bookingId) lastBookingIdProcessed = bookingId;
                     if (startISO) lastBookingStartISO = startISO;

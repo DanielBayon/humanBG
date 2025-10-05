@@ -1303,64 +1303,33 @@ app.ws("/realtime-ws", (clientWs) => {
           console.log(`[DEBUG] WebSocket readyState: ${clientWs?.readyState}, WS_OPEN: ${WS_OPEN}`);
           console.log(`[DEBUG] appointmentData en mensaje:`, JSON.stringify(msg.appointmentData, null, 2));
           
+          // 🚨 CRÍTICO: Si no está pausado, significa que el webhook ya procesó → IGNORAR COMPLETAMENTE (como OpenAI)
           if (!isPausedForUserAction) {
-            console.log("⚠️ Recibido user_action_completed pero no estaba pausado para acción de usuario.");
+            console.log("⚠️ Recibido user_action_completed pero no estaba pausado. El webhook ya procesó esto.");
+            console.log("� IGNORANDO COMPLETAMENTE para evitar duplicados (igual que OpenAI).");
             
-            // Si tenemos datos de appointment en el mensaje, podría ser un caso válido
-            // donde el webhook procesó primero pero el frontend no se enteró
-            if (msg.appointmentData && (msg.appointmentData.startTime || msg.appointmentData.start?.time)) {
-              console.log("📅 Pero tenemos appointmentData válida. Procesando como confirmación de reserva...");
-              // Continuar con el procesamiento normal
-            } else {
-              console.log("❌ Y no hay appointmentData válida. IGNORANDO completamente.");
-              // AÑADIR: Enviar evento para cerrar modal aunque no estemos pausados
-              safeSend(clientWs, {
-                type: "booking_completed", 
-                details: { canceled: true }
-              });
-              console.log(`[DEBUG] ✅ Evento booking_completed (cancelado) enviado para cerrar modal.`);
-              break;
-            }
+            // Solo enviar confirmación al frontend para cerrar modal si aún está abierto
+            safeSend(clientWs, {
+              type: "booking_completed", 
+              details: { alreadyProcessed: true }
+            });
+            console.log(`[DEBUG] ✅ Evento booking_completed (ya procesado) enviado para cerrar modal.`);
+            break; // ⭐ CLAVE: Salir completamente sin procesar nada más
           }
 
+          // Si llegamos aquí, significa que la conversación SÍ estaba pausada
+          console.log("✅ [USER_ACTION] Conversación pausada. Procesando user_action_completed...");
           isPausedForUserAction = false;
 
           let systemText;
           
-          // PRIORIDAD 1: si el front nos manda appointmentData, úsalo y listo (idempotente)
+          // PRIORIDAD 1: si el front nos manda appointmentData, úsalo
           if (msg.appointmentData && (msg.appointmentData.startTime || (msg.appointmentData.start && msg.appointmentData.start.time))) {
             const startISO = msg.appointmentData.startTime || msg.appointmentData.start?.time || null;
             const bookingId = msg.appointmentData.id || msg.appointmentData.uid || msg.appointmentData.bookingId || null;
             
-            // Verificar deduplicación usando las mismas variables que el webhook
+            // Actualizar variables de deduplicación para prevenir futuras duplicaciones
             const now = Date.now();
-            const NEAR_WINDOW_MS = 5 * 60 * 1000; // ±5 minutos
-            const ANTI_DUP_MS = 10 * 1000;        // 10 segundos
-            
-            if (bookingId && lastBookingIdProcessed && bookingId === lastBookingIdProcessed) {
-              console.log("🔁 [USER_ACTION] Duplicado por bookingId detectado. Ya fue procesado por webhook.");
-              // Solo enviar confirmación al frontend pero no generar nueva respuesta
-              safeSend(clientWs, {
-                type: "booking_completed",
-                details: { alreadyProcessed: true }
-              });
-              break;
-            }
-            
-            if (!bookingId && startISO && lastBookingStartISO) {
-              const t1 = new Date(startISO).getTime();
-              const t2 = new Date(lastBookingStartISO).getTime();
-              if (Math.abs(t1 - t2) <= NEAR_WINDOW_MS && (now - bookingAnnouncedTs) < ANTI_DUP_MS) {
-                console.log("🔁 [USER_ACTION] Duplicado por timing detectado. Ya fue procesado por webhook.");
-                safeSend(clientWs, {
-                  type: "booking_completed",
-                  details: { alreadyProcessed: true }
-                });
-                break;
-              }
-            }
-            
-            // Actualizar variables de deduplicación
             if (bookingId) lastBookingIdProcessed = bookingId;
             if (startISO) lastBookingStartISO = startISO;
             bookingAnnouncedTs = now;

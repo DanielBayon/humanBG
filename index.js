@@ -1498,15 +1498,27 @@ app.post("/webhook/booking-completed", express.raw({ type: "application/json" })
 
     // Parse
     const payload = JSON.parse(req.body.toString());
-    console.log("[WEBHOOK CAL.COM] Payload:", JSON.stringify(payload, null, 2));
+    console.log("[WEBHOOK CAL.COM] ===== WEBHOOK RECIBIDO =====");
+    console.log("[WEBHOOK CAL.COM] Headers:", JSON.stringify(req.headers, null, 2));
+    console.log("[WEBHOOK CAL.COM] Payload completo:", JSON.stringify(payload, null, 2));
+    console.log("[WEBHOOK CAL.COM] triggerEvent:", payload.triggerEvent);
+    
     if (payload.triggerEvent !== "BOOKING_CREATED") {
+      console.log(`[WEBHOOK CAL.COM] ⚠️ Evento ${payload.triggerEvent} no es BOOKING_CREATED, ignorando.`);
       return res.status(200).send("Evento no relevante, ignorado.");
     }
+    
+    console.log("[WEBHOOK CAL.COM] ✅ Evento BOOKING_CREATED detectado, procesando...");
 
     // conversationId desde metadata o booking question
     const p = payload.payload || {};
     const meta = p.metadata || {};
     const responses = p.responses || {};
+    
+    console.log("[WEBHOOK CAL.COM] 🔍 Buscando conversationId en:");
+    console.log("  - metadata:", JSON.stringify(meta, null, 2));
+    console.log("  - responses:", JSON.stringify(responses, null, 2));
+    
     let conversationId =
       meta.convoId ||
       responses?.convoId?.value ||
@@ -1514,10 +1526,14 @@ app.post("/webhook/booking-completed", express.raw({ type: "application/json" })
         ? (responses.find(r => (r?.label || r?.name) === "convoId")?.value || null)
         : null);
 
+    console.log("[WEBHOOK CAL.COM] conversationId extraído:", conversationId);
+
     if (!conversationId) {
-      console.warn("[WEBHOOK CAL.COM] No se encontró conversationId.");
+      console.warn("[WEBHOOK CAL.COM] ❌ No se encontró conversationId en ningún lugar.");
       return res.status(400).send("Faltan datos (conversationId).");
     }
+    
+    console.log("[WEBHOOK CAL.COM] ✅ conversationId encontrado:", conversationId);
 
     // Datos compactos para persistir si hace falta
     const startISO = p.startTime || p.start?.time || null;
@@ -1541,17 +1557,26 @@ app.post("/webhook/booking-completed", express.raw({ type: "application/json" })
     };
 
     // Si hay conexión activa, reanudar por WS
+    console.log("[WEBHOOK CAL.COM] 🔍 Verificando conexiones activas...");
+    console.log("[WEBHOOK CAL.COM] Total conexiones activas:", activeConnections.size);
+    console.log("[WEBHOOK CAL.COM] IDs de conexiones activas:", Array.from(activeConnections.keys()));
+    
     const connection = activeConnections.get(conversationId);
+    
     if (connection && typeof connection.resumeWithBookingData === "function") {
-      console.log(`[WEBHOOK CAL.COM] Conversación ${conversationId} ACTIVA. Reanudando por WS.`);
+      console.log(`[WEBHOOK CAL.COM] ✅ Conversación ${conversationId} ACTIVA. Reanudando por WS.`);
       try {
         await connection.resumeWithBookingData(p);
+        console.log(`[WEBHOOK CAL.COM] ✅ Reanudación por WS exitosa para ${conversationId}`);
         return res.status(200).send("Conversación reanudada con éxito (WS).");
       } catch (err) {
-        console.error("[WEBHOOK CAL.COM] Error reanudando por WS, persistimos:", err);
+        console.error("[WEBHOOK CAL.COM] ❌ Error reanudando por WS, persistimos:", err);
       }
     } else {
-      console.warn(`[WEBHOOK CAL.COM] Conversación ${conversationId} no activa. Persistimos evento para reanudación diferida.`);
+      console.warn(`[WEBHOOK CAL.COM] ⚠️ Conversación ${conversationId} no activa o sin método resumeWithBookingData. Persistimos evento para reanudación diferida.`);
+      if (connection) {
+        console.log("[WEBHOOK CAL.COM] 🔍 Conexión existe pero no tiene método resumeWithBookingData:", Object.keys(connection));
+      }
     }
 
     // Persistir para el flujo user_action_completed (fallback antiguo)

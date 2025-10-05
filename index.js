@@ -1237,38 +1237,14 @@ app.ws("/realtime-ws", (clientWs) => {
 
                     console.log(`[BOOKING] 📝 Enviando mensaje de sistema a Gemini: ${systemText}`);
                     
-                    // CAMBIO CRÍTICO: Generar la respuesta completa aquí directamente
+                    // CAMBIO CRÍTICO: Inyectar el contexto como un mensaje de sistema.
                     await geminiChat.sendMessage([{
                       text: systemText
                     }]);
                     
-                    // Generar respuesta automática inmediatamente
-                    console.log(`[BOOKING] 🤖 Generando respuesta automática...`);
-                    const result = await geminiChat.sendMessageStream(""); // Stream vacío para trigger automático
-                    
-                    let fullText = "";
-                    for await (const chunk of result.stream) {
-                      if (!chunk || typeof chunk !== 'object') continue;
-
-                      const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
-                      
-                      for (const cand of candidates) {
-                        if (!cand || !cand.content || !Array.isArray(cand.content.parts)) continue;
-
-                        const parts = cand.content.parts;
-                        
-                        for (const part of parts) {
-                          if (part && typeof part.text === "string" && part.text.length > 0) {
-                            fullText += part.text;
-                            safeSend(clientWs, { type: "assistant_delta", delta: part.text });
-                          }
-                        }
-                      }
-                    }
-                    
-                    // Confirmar respuesta final con supervisión
-                    await commitAssistantFinal(fullText, { supervise: true });
-                    console.log(`[BOOKING] ✅ Respuesta automática completada: "${fullText.substring(0, 100)}..."`);
+                    // CAMBIO CRÍTICO: Llamar a getGeminiResponse con un texto de activación para generar la respuesta.
+                    console.log(`[BOOKING] 🤖 Generando respuesta de confirmación...`);
+                    await getGeminiResponse("Ok, entendido. Procede a confirmar la cita al usuario.");
 
                     if (bookingId) lastBookingIdProcessed = bookingId;
                     if (startISO) lastBookingStartISO = startISO;
@@ -1300,40 +1276,24 @@ app.ws("/realtime-ws", (clientWs) => {
 
         case "user_action_completed": {
           console.log(`[DEBUG] Recibido user_action_completed. isPausedForUserAction: ${isPausedForUserAction}`);
-          console.log(`[DEBUG] WebSocket readyState: ${clientWs?.readyState}, WS_OPEN: ${WS_OPEN}`);
-          console.log(`[DEBUG] appointmentData en mensaje:`, JSON.stringify(msg.appointmentData, null, 2));
           
-          // 🚨 CRÍTICO: Si no está pausado, significa que el webhook ya procesó → IGNORAR COMPLETAMENTE (como OpenAI)
+          // 🚨 CRÍTICO: Si no está pausado, significa que el webhook ya procesó o está procesando.
+          // IGNORAR COMPLETAMENTE para evitar la condición de carrera.
           if (!isPausedForUserAction) {
-            console.log("⚠️ Recibido user_action_completed pero no estaba pausado. El webhook ya procesó esto.");
-            console.log("� IGNORANDO COMPLETAMENTE para evitar duplicados (igual que OpenAI).");
-            
-            // Solo enviar confirmación al frontend para cerrar modal si aún está abierto
-            safeSend(clientWs, {
-              type: "booking_completed", 
-              details: { alreadyProcessed: true }
-            });
-            console.log(`[DEBUG] ✅ Evento booking_completed (ya procesado) enviado para cerrar modal.`);
-            break; // ⭐ CLAVE: Salir completamente sin procesar nada más
+            console.log("⚠️ [USER_ACTION] Ignorado: la conversación no estaba en pausa. El webhook tiene prioridad.");
+            break;
           }
 
-          // Si llegamos aquí, significa que la conversación SÍ estaba pausada
-          console.log("✅ [USER_ACTION] Conversación pausada. Procesando user_action_completed...");
+          // Si llegamos aquí, el webhook no se ha ejecutado. Este es el flujo de fallback.
+          console.log("✅ [USER_ACTION] Procesando user_action_completed como fallback (el webhook no llegó).");
           isPausedForUserAction = false;
 
           let systemText;
           
-          // PRIORIDAD 1: si el front nos manda appointmentData, úsalo
+          // Lógica para obtener datos de la cita (si existen) y formular el systemText
+          // Esta parte es ahora un fallback y puede que no tenga datos si el usuario simplemente cerró el modal.
           if (msg.appointmentData && (msg.appointmentData.startTime || (msg.appointmentData.start && msg.appointmentData.start.time))) {
             const startISO = msg.appointmentData.startTime || msg.appointmentData.start?.time || null;
-            const bookingId = msg.appointmentData.id || msg.appointmentData.uid || msg.appointmentData.bookingId || null;
-            
-            // Actualizar variables de deduplicación para prevenir futuras duplicaciones
-            const now = Date.now();
-            if (bookingId) lastBookingIdProcessed = bookingId;
-            if (startISO) lastBookingStartISO = startISO;
-            bookingAnnouncedTs = now;
-            
             const title = msg.appointmentData.eventName || msg.appointmentData.title || "Tu cita";
             const fechaLegible = startISO
               ? new Date(startISO).toLocaleString('es-ES', { dateStyle: 'full', timeStyle: 'short' })
@@ -1348,106 +1308,18 @@ app.ws("/realtime-ws", (clientWs) => {
 1) Confirma verbalmente la cita.
 2) Indica que recibirá un email con los detalles.
 3) Pregunta si necesita algo más.`;
-
           } else {
-            // PRIORIDAD 2: compat con el flujo antiguo (Firestore PendingBookingEvents)
-            try {
-              const bookingEventRef = adminDb.collection("Conversations").doc(conversationId).collection("PendingBookingEvents").doc("latest");
-              const bookingEventSnap = await bookingEventRef.get();
-
-              if (bookingEventSnap.exists) {
-                console.log(`[RESUME] ¡Reserva encontrada para ${conversationId}!`);
-                const bookingData = bookingEventSnap.data();
-                
-                // CAMBIO CRÍTICO: Verificar que tenemos startTime y formatearlo correctamente
-                console.log(`[RESUME] Datos de la reserva:`, JSON.stringify(bookingData, null, 2));
-                
-                if (bookingData.startTime) {
-                  // Convertir Firestore Timestamp a Date si es necesario
-                  let startDate;
-                  if (bookingData.startTime.toDate) {
-                    // Es un Firestore Timestamp
-                    startDate = bookingData.startTime.toDate();
-                  } else if (typeof bookingData.startTime === 'string') {
-                    // Es una string ISO
-                    startDate = new Date(bookingData.startTime);
-                  } else {
-                    // Asumir que ya es un Date
-                    startDate = new Date(bookingData.startTime);
-                  }
-                  
-                  const formattedDate = startDate.toLocaleString('es-ES', { 
-                    dateStyle: 'full', 
-                    timeStyle: 'short',
-                    timeZone: 'Europe/Madrid'
-                  });
-                  
-                  const title = bookingData.title || "Tu cita";
-                  
-                  systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito. Los detalles son: "${title}" para el ${formattedDate}.
-1) Confirma verbalmente la cita mencionando día y hora.
-2) Indica que recibirá un email del sistema con el enlace a Google Meet para la videoconferencia y que le permite añadir la cita a su calendario.
-3) Pregunta si necesita algo más.`;
-                  
-                  console.log(`[RESUME] Mensaje de confirmación preparado: ${systemText}`);
-                } else {
-                  console.warn(`[RESUME] Reserva encontrada pero sin startTime válido:`, bookingData);
-                  systemText = `INSTRUCCIÓN: El usuario acaba de agendar una cita con éxito.
-1) Confirma verbalmente la cita.
-2) Indica que recibirá un email del sistema con los detalles.
-3) Pregunta si necesita algo más.`;
-                }
-
-                await bookingEventRef.delete();
-                console.log(`[DB OK] Evento de reserva procesado y eliminado para ${conversationId}.`);
-              } else {
-                console.log(`[RESUME] No se encontró reserva para ${conversationId}. El usuario cerró el modal.`);
-                systemText = "El usuario ha cerrado el calendario sin agendar una cita. Pregúntale amablemente si necesita algo más o si quiere intentarlo de nuevo.";
-              }
-            } catch (error) {
-              console.error(`[RESUME ERROR] Fallo al buscar evento de reserva para ${conversationId}:`, error);
-              systemText = "El usuario ha cerrado la ventana de agendamiento. Pregúntale si puedes ayudarle en algo más.";
-            }
+             systemText = "El usuario ha cerrado el calendario sin agendar una cita. Pregúntale amablemente si necesita algo más o si quiere intentarlo de nuevo.";
           }
 
-          // Inyectar y responder CON GEMINI (no OpenAI)
-          console.log(`[RESUME] Enviando mensaje de sistema a Gemini: ${systemText}`);
+          // Inyectar y responder
+          console.log(`[USER_ACTION] Enviando mensaje de sistema a Gemini: ${systemText}`);
           await geminiChat.sendMessage([{
             text: systemText
           }]);
-          console.log(`[DEBUG] Mensaje de sistema enviado. Ahora generando respuesta automática...`);
-
-          // CAMBIO CRÍTICO: Generar respuesta automática sin input de usuario
-          // Similar a como funciona streamFollowUpAfterTool para otras herramientas
-          try {
-            const result = await geminiChat.sendMessageStream(""); // Stream vacío para trigger automático
-            
-            let fullText = "";
-            for await (const chunk of result.stream) {
-              if (!chunk || typeof chunk !== 'object') continue;
-
-              const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
-              
-              for (const cand of candidates) {
-                if (!cand || !cand.content || !Array.isArray(cand.content.parts)) continue;
-
-                const parts = cand.content.parts;
-                
-                for (const part of parts) {
-                  if (part && typeof part.text === "string" && part.text.length > 0) {
-                    fullText += part.text;
-                    safeSend(clientWs, { type: "assistant_delta", delta: part.text });
-                  }
-                }
-              }
-            }
-            
-            // Confirmar respuesta final
-            await commitAssistantFinal(fullText, { supervise: false });
-            console.log(`[DEBUG] Respuesta automática de agendamiento completada.`);
-          } catch (error) {
-            console.error("[RESUME ERROR] Error generando respuesta automática:", error);
-          }
+          
+          // Generar respuesta
+          await getGeminiResponse("Ok, procede.");
 
           break;
         }

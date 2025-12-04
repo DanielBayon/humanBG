@@ -720,8 +720,39 @@ app.ws("/realtime-ws", (clientWs) => {
       }
       seenToolCalls.add(key);
 
-      // Aviso al front
-      safeSend(clientWs, { type: "tool_execution_start", toolName: name });
+      // Detectar tipo de acción para el frontend
+      let actionType = "generic";
+      let actionDetails = {};
+      
+      if (name === "ejecutar_orden_n8n" && args.orden) {
+        const ordenLower = args.orden.toLowerCase();
+        if (ordenLower.includes("email") || ordenLower.includes("correo") || ordenLower.includes("enviar mail") || ordenLower.includes("envía mail") || ordenLower.includes("enviar un email") || ordenLower.includes("envía un email")) {
+          actionType = "send_email";
+          // Intentar extraer el destinatario del email de la orden
+          const emailMatch = args.orden.match(/[\w.-]+@[\w.-]+\.\w+/);
+          actionDetails = {
+            recipient: emailMatch ? emailMatch[0] : null,
+            orderText: args.orden
+          };
+        } else if (ordenLower.includes("guardar") || ordenLower.includes("guarda") || ordenLower.includes("registra") || ordenLower.includes("save") || ordenLower.includes("contacto")) {
+          actionType = "save_data";
+          actionDetails = { orderText: args.orden };
+        } else if (ordenLower.includes("llamada") || ordenLower.includes("callback") || ordenLower.includes("contactar") || ordenLower.includes("llama")) {
+          actionType = "schedule_callback";
+          actionDetails = { orderText: args.orden };
+        }
+      } else if (name === "abrir_modal_agendamiento") {
+        actionType = "open_calendar";
+        actionDetails = { nombre: args.nombre, email: args.email };
+      }
+
+      // Aviso al front con información enriquecida
+      safeSend(clientWs, { 
+        type: "tool_execution_start", 
+        toolName: name,
+        actionType: actionType,
+        actionDetails: actionDetails
+      });
 
       // EJECUTAR HERRAMIENTA DIRECTAMENTE (sin validación previa como en el código original)
       console.log(`[TOOLS] Ejecutando herramienta directamente: ${name}`);

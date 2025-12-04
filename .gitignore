@@ -80,3 +80,5 @@ temp/
 *.njsproj
 *.sln
 *.sw?
+
+bash.sh

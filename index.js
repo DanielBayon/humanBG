@@ -256,8 +256,9 @@ function makeStandardSystemPrompt(botData, opts = {}) {
   // Construir instrucciones de navegación si está habilitado
   let navigationInstructions = "";
   if (hasNavigation && Object.keys(navigationMap).length > 0) {
+    // Formato simplificado: { "etiqueta": "descripción" }
     const sectionsList = Object.entries(navigationMap)
-      .map(([key, val]) => `- "${val.tag}": ${val.description}`)
+      .map(([tag, description]) => `- "${tag}": ${description}`)
       .join("\n");
     
     navigationInstructions = (lang === "en") ? `
@@ -1148,16 +1149,17 @@ app.ws("/realtime-ws", (clientWs) => {
               };
             }
 
-            // Configurar herramienta de navegación web si hay navigationMap
+            // Configurar herramienta de navegación web si webNav está habilitado
+            const webNavEnabled = botData.webNav === true;
             const navigationMap = botData.navigationMap || null;
-            const hasNavigation = navigationMap && Object.keys(navigationMap).length > 0;
+            const hasNavigation = webNavEnabled && navigationMap && Object.keys(navigationMap).length > 0;
             
             if (hasNavigation) {
               console.log(`[CONFIG] Navegación web activada para bot ${currentBotId}. Secciones:`, Object.keys(navigationMap));
               
-              // Construir descripción dinámica con las secciones disponibles
+              // Formato simplificado: { "etiqueta": "descripción" }
               const seccionesDisponibles = Object.entries(navigationMap)
-                .map(([key, val]) => `"${val.tag}" (${val.description})`)
+                .map(([tag, description]) => `"${tag}" (${description})`)
                 .join(", ");
               
               currentTools.push({
@@ -1180,8 +1182,8 @@ app.ws("/realtime-ws", (clientWs) => {
                 try {
                   console.log(`[TOOL navegar_web] Navegando a sección: ${seccion_tag}`);
                   
-                  // Validar que la sección existe en el mapa
-                  const seccionValida = Object.values(navigationMap).some(s => s.tag === seccion_tag);
+                  // Validar que la sección existe en el mapa (ahora la clave es directamente el tag)
+                  const seccionValida = Object.keys(navigationMap).includes(seccion_tag);
                   
                   if (!seccionValida) {
                     console.warn(`[TOOL navegar_web] Sección "${seccion_tag}" no encontrada en navigationMap`);

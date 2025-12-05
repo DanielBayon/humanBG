@@ -821,8 +821,15 @@ app.ws("/realtime-ws", (clientWs) => {
       console.log(`[TOOL EXECUTION] Resultado de ${name}:`, JSON.stringify(result, null, 2));
       safeSend(clientWs, { type: "tool_execution_end", toolName: name, success: result?.status === "success" });
 
-      // Entregar la salida de la herramienta al modelo (functionResponse)
-      await sendFunctionResponseToGemini(name, result);
+      // Herramientas silenciosas: no envían respuesta a Gemini
+      const silentToolsNoGeminiResponse = ["navegar_web"];
+      
+      if (!silentToolsNoGeminiResponse.includes(name)) {
+        // Entregar la salida de la herramienta al modelo (functionResponse)
+        await sendFunctionResponseToGemini(name, result);
+      } else {
+        console.log(`[TOOLS] Herramienta silenciosa "${name}" - no se envía respuesta a Gemini`);
+      }
 
       // Actualizar transcript con ejecución de herramienta
       const toolExecutionString = `\nEjecución De Herramienta Por Parte Del Agente: ${name}(${JSON.stringify(args)}) - Resultado: ${result?.status || 'unknown'}`;
@@ -853,13 +860,15 @@ app.ws("/realtime-ws", (clientWs) => {
       currentUserTranscript = "";
       isCorrecting = false;
 
-      // Solo para herramientas que NO son de agendamiento, generar réplica post-tool
-      if (name !== "abrir_modal_agendamiento") {
-        // Pasar información sobre el éxito de la herramienta
-        await streamFollowUpAfterTool(result?.status === "success", name, args.orden);
+      // Herramientas silenciosas: no generan follow-up ni respuesta de Gemini
+      const silentTools = ["abrir_modal_agendamiento", "navegar_web"];
+      
+      if (silentTools.includes(name)) {
+        // Para herramientas silenciosas, no generar réplica post-tool
+        console.log(`[TOOL_FLOW] Herramienta silenciosa "${name}" completada. Sin follow-up.`);
       } else {
-        // 🚨 CRÍTICO: Para agendamiento, la pausa ya se estableció en el handler
-        console.log(`[TOOL_FLOW] Agendamiento completado. Pausa ya establecida por el handler.`);
+        // Para otras herramientas, generar réplica post-tool
+        await streamFollowUpAfterTool(result?.status === "success", name, args.orden);
       }
 
     } catch (err) {
@@ -905,9 +914,10 @@ app.ws("/realtime-ws", (clientWs) => {
   }
 
   async function streamFollowUpAfterTool(wasSuccessful = false, toolName = "", actionPerformed = "") {
-    // 🚨 CRÍTICO: Para agendamiento NO generar follow-up, igual que OpenAI
-    if (toolName === "abrir_modal_agendamiento") {
-      console.log(`[TOOL_FLOW] Agendamiento ejecutado. No se genera follow-up (backend pausado).`);
+    // 🚨 CRÍTICO: Herramientas silenciosas NO generan follow-up
+    const silentToolsNoFollowUp = ["abrir_modal_agendamiento", "navegar_web"];
+    if (silentToolsNoFollowUp.includes(toolName)) {
+      console.log(`[TOOL_FLOW] Herramienta silenciosa "${toolName}". No se genera follow-up.`);
       return;
     }
 

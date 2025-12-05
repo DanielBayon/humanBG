@@ -244,12 +244,50 @@ function makeStandardSystemPrompt(botData, opts = {}) {
   const lang = (botData.language?.toLowerCase() === "en") ? "en" : "es";
   const hasN8n = !!opts?.hasN8n;
   const hasBooking = !!opts?.hasBooking;
+  const hasNavigation = !!opts?.hasNavigation;
+  const navigationMap = opts?.navigationMap || {};
   const persona = botData.Variable1 || (lang === "en" ? "a helpful virtual assistant" : "un asistente virtual útil");
   const firstLine = botData.Variable5 ? (lang === "en"
     ? `\nYour FIRST sentence must be EXACTLY: "${botData.Variable5}".`
     : `\nTu PRIMERA frase debe ser EXACTAMENTE: "${botData.Variable5}".`) : "";
   const specific = botData.Variable2 ? `\n\n${lang === "en" ? "### TASK-SPECIFIC INSTRUCTIONS" : "### INSTRUCCIONES ESPECÍFICAS DE LA TAREA"}\n${botData.Variable2}` : "";
   const accionesDesc = botData.accionesDescription || "";
+  
+  // Construir instrucciones de navegación si está habilitado
+  let navigationInstructions = "";
+  if (hasNavigation && Object.keys(navigationMap).length > 0) {
+    const sectionsList = Object.entries(navigationMap)
+      .map(([key, val]) => `- "${val.tag}": ${val.description}`)
+      .join("\n");
+    
+    navigationInstructions = (lang === "en") ? `
+### WEB NAVIGATION
+You can move the user's view to different sections of the webpage using the \`navegar_web\` tool. This is useful when you want to visually show them something while you explain.
+
+Available sections:
+${sectionsList}
+
+Use \`navegar_web\` when:
+- The user asks about something that is visually displayed on the web
+- You want to complement your explanation with visual content
+- The user asks to see a specific section
+
+Example: If the user asks "What are your prices?", you can navigate to the pricing section while explaining.
+` : `
+### NAVEGACIÓN WEB
+Tienes la capacidad de mover la vista del usuario a diferentes secciones de la página web usando la herramienta \`navegar_web\`. Esto es útil cuando quieras mostrarle visualmente algo mientras le explicas.
+
+Secciones disponibles:
+${sectionsList}
+
+Usa \`navegar_web\` cuando:
+- El usuario pregunte por algo que se muestra visualmente en la web
+- Quieras complementar tu explicación con el contenido visual
+- El usuario pida ver una sección específica
+
+Ejemplo: Si el usuario pregunta "¿Cuáles son sus precios?", puedes navegar a la sección de precios mientras le explicas.
+`;
+  }
 
   const core = (lang === "en") ? `
 You are ${persona} for customer service. Be concise, direct and friendly. Always prioritize accuracy and ask only for what's strictly necessary to complete the task.
@@ -293,6 +331,8 @@ ${hasBooking ? `### Appointment Scheduling (Cal.com)
 - Pass any known name, email (only if typed), and a short summary. Do not fabricate data.
 - **Time confirmation:** When booking completes, confirm the **exact date/time received from the system** (do NOT reinterpret timezones). Speak it in the user's locale.
 ` : ""}
+
+${navigationInstructions}
 
 ### Safety & Privacy
 - Never invent emails/phones.
@@ -346,6 +386,8 @@ ${hasBooking ? `### Agendado de citas (Cal.com)
 - Pasa nombre, email (solo si está escrito) y un breve resumen si lo tienes. No inventes datos.
 - **Confirmación horaria:** Al confirmar, repite la **fecha/hora exacta que devuelve el sistema** (NO reinterpretes husos). Exprésala en español natural para el usuario.
 ` : ""}
+
+${navigationInstructions}
 
 ### Seguridad y Privacidad
 - No inventes emails/teléfonos.
@@ -744,6 +786,9 @@ app.ws("/realtime-ws", (clientWs) => {
       } else if (name === "abrir_modal_agendamiento") {
         actionType = "open_calendar";
         actionDetails = { nombre: args.nombre, email: args.email };
+      } else if (name === "navegar_web") {
+        actionType = "navigate_web";
+        actionDetails = { target: args.seccion_tag };
       }
 
       // Aviso al front con información enriquecida
@@ -1103,12 +1148,68 @@ app.ws("/realtime-ws", (clientWs) => {
               };
             }
 
+            // Configurar herramienta de navegación web si hay navigationMap
+            const navigationMap = botData.navigationMap || null;
+            const hasNavigation = navigationMap && Object.keys(navigationMap).length > 0;
+            
+            if (hasNavigation) {
+              console.log(`[CONFIG] Navegación web activada para bot ${currentBotId}. Secciones:`, Object.keys(navigationMap));
+              
+              // Construir descripción dinámica con las secciones disponibles
+              const seccionesDisponibles = Object.entries(navigationMap)
+                .map(([key, val]) => `"${val.tag}" (${val.description})`)
+                .join(", ");
+              
+              currentTools.push({
+                type: "function",
+                name: "navegar_web",
+                description: `Mueve la pantalla del usuario a una sección específica de la web para mostrarle información visual mientras hablas. Usa esta herramienta cuando quieras que el usuario vea algo en la página mientras le explicas. Secciones disponibles: ${seccionesDisponibles}`,
+                parameters: {
+                  type: "object",
+                  properties: {
+                    seccion_tag: {
+                      type: "string",
+                      description: "El identificador de la sección a la que navegar. Debe ser uno de los valores válidos del mapa de navegación."
+                    }
+                  },
+                  required: ["seccion_tag"]
+                }
+              });
+
+              toolHandlers.navegar_web = async ({ seccion_tag }) => {
+                try {
+                  console.log(`[TOOL navegar_web] Navegando a sección: ${seccion_tag}`);
+                  
+                  // Validar que la sección existe en el mapa
+                  const seccionValida = Object.values(navigationMap).some(s => s.tag === seccion_tag);
+                  
+                  if (!seccionValida) {
+                    console.warn(`[TOOL navegar_web] Sección "${seccion_tag}" no encontrada en navigationMap`);
+                    return { status: "error", message: `La sección "${seccion_tag}" no existe en el mapa de navegación.` };
+                  }
+
+                  if (clientWs && clientWs.readyState === WS_OPEN) {
+                    // El mensaje tool_execution_start con actionType ya se envía en handleFunctionCall
+                    // Aquí solo confirmamos el éxito
+                    return { status: "success", message: `Navegación a "${seccion_tag}" completada.` };
+                  }
+
+                  return { status: "error", message: "No se pudo contactar al cliente para navegar." };
+                } catch (err) {
+                  console.error("[TOOL navegar_web ERROR]", err);
+                  return { status: "error", message: `Error en navegación web: ${err.message}` };
+                }
+              };
+            }
+
             // Configurar prompt del sistema
             const lang = botData.language?.toLowerCase() === "en" ? "en" : "es";
             const tieneN8n = !!currentN8nWebhook;
             const systemPrompt = makeStandardSystemPrompt(botData, {
               hasN8n: tieneN8n,
               hasBooking: (sistemaAgendado && bookingUrl),
+              hasNavigation: hasNavigation,
+              navigationMap: navigationMap,
               language: lang
             });
 

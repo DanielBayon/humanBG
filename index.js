@@ -268,12 +268,14 @@ You can move the user's view to different sections of the webpage using the \`na
 Available sections:
 ${sectionsList}
 
-Use \`navegar_web\` when:
-- The user asks about something that is visually displayed on the web
-- You want to complement your explanation with visual content
-- The user asks to see a specific section
+IMPORTANT RULES:
+1. **Navigation complements, never replaces your verbal response.** If the user asks a question whose answer is on the web, you MUST answer verbally AND navigate to show them visually.
+2. **If the user just asks to be taken somewhere** (e.g., "take me to pricing"), briefly confirm ("Sure, taking you to the pricing section") and navigate.
+3. **Do NOT say anything about the navigation after it's done.** Just continue naturally.
 
-Example: If the user asks "What are your prices?", you can navigate to the pricing section while explaining.
+Examples:
+- User: "What are your prices?" → You explain the prices verbally AND call navegar_web to show the pricing section.
+- User: "Show me the services" → You say "Of course, here are our services" AND call navegar_web to navigate there.
 ` : `
 ### NAVEGACIÓN WEB
 Tienes la capacidad de mover la vista del usuario a diferentes secciones de la página web usando la herramienta \`navegar_web\`. Esto es útil cuando quieras mostrarle visualmente algo mientras le explicas.
@@ -281,12 +283,14 @@ Tienes la capacidad de mover la vista del usuario a diferentes secciones de la p
 Secciones disponibles:
 ${sectionsList}
 
-Usa \`navegar_web\` cuando:
-- El usuario pregunte por algo que se muestra visualmente en la web
-- Quieras complementar tu explicación con el contenido visual
-- El usuario pida ver una sección específica
+REGLAS IMPORTANTES:
+1. **La navegación complementa, nunca sustituye tu respuesta verbal.** Si el usuario hace una pregunta cuya respuesta está en la web, DEBES responder verbalmente Y además navegar para mostrárselo visualmente.
+2. **Si el usuario solo pide que le lleves a algún sitio** (ej: "llévame a precios"), confirma brevemente ("Perfecto, te llevo a la sección de precios") y navega.
+3. **NO digas nada sobre la navegación después de realizarla.** Simplemente continúa de forma natural.
 
-Ejemplo: Si el usuario pregunta "¿Cuáles son sus precios?", puedes navegar a la sección de precios mientras le explicas.
+Ejemplos:
+- Usuario: "¿Cuáles son sus precios?" → Explicas los precios verbalmente Y llamas a navegar_web para mostrar la sección de precios.
+- Usuario: "Muéstrame los servicios" → Dices "Por supuesto, aquí tienes nuestros servicios" Y llamas a navegar_web para navegar allí.
 `;
   }
 

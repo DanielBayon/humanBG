@@ -1509,6 +1509,42 @@ app.ws("/realtime-ws", (clientWs) => {
           }
           break;
         }
+
+        case "tour_assistant_message": {
+          // Mensaje de tour guiado: se añade al historial como mensaje del asistente
+          // NO se envía al frontend (el front ya lo reproduce)
+          const tourText = msg.text;
+          if (tourText && typeof tourText === "string" && tourText.trim()) {
+            console.log(`[TOUR] Mensaje de tour recibido: "${tourText.substring(0, 50)}..."`);
+            
+            // Añadir al transcript
+            fullConversationTranscript += `\nAI-BOT (Tour): ${tourText}`;
+            
+            // Persistir en Firestore
+            if (conversationId && conversationCreated) {
+              adminDb.collection("Conversations").doc(conversationId)
+                .update({ 
+                  BotTranscripcion: fullConversationTranscript,
+                  Timestamp: admin.firestore.Timestamp.now()
+                })
+                .catch(err => console.error("[DB ERROR] Al guardar mensaje de tour:", err));
+            }
+            
+            // Añadir al historial de Gemini como mensaje del modelo
+            if (geminiChat) {
+              try {
+                // Inyectar como mensaje del asistente en el historial
+                await geminiChat.sendMessage([{ text: `[Contexto: He dicho al usuario lo siguiente durante el tour] "${tourText}"` }]);
+                console.log(`[TOUR] Mensaje añadido al historial de Gemini.`);
+              } catch (err) {
+                console.error("[TOUR] Error añadiendo al historial de Gemini:", err);
+              }
+            }
+            
+            console.log(`[TOUR] Mensaje de tour procesado (sin enviar al frontend).`);
+          }
+          break;
+        }
       }
     } catch (e) {
       console.error("[WS onmessage ERROR]", e);

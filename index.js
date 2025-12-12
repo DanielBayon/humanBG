@@ -1518,7 +1518,16 @@ app.ws("/realtime-ws", (clientWs) => {
 2) Indica que recibirá un email con los detalles.
 3) Pregunta si necesita algo más.`;
           } else {
-             systemText = "El usuario ha cerrado el calendario sin agendar una cita. Pregúntale amablemente si necesita algo más o si quiere intentarlo de nuevo.";
+             systemText = `[SISTEMA: El usuario cerró la ventana de agendamiento sin seleccionar una cita.]
+
+INSTRUCCIONES IMPORTANTES:
+1) NO vuelvas a abrir el modal de agendamiento automáticamente.
+2) Comenta de forma amable que notaste que cerró la ventana de agendado.
+3) Ofrécele que si fue un error, puedes volver a mostrársela cuando quiera.
+4) Si prefiere agendar en otro momento, está perfecto.
+5) Pregunta en qué más puedes ayudarle.
+
+Ejemplo de respuesta: "Veo que cerraste la ventana de agendado. Si fue un error, puedo volver a mostrártela cuando quieras. Si prefieres hacerlo en otro momento, no hay problema. ¿En qué más puedo ayudarte?"`;
           }
 
           // Inyectar y responder

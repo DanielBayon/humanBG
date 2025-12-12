@@ -797,17 +797,22 @@ app.ws("/realtime-ws", (clientWs) => {
       }
 
       // Aviso al front con información enriquecida
-      safeSend(clientWs, { 
-        type: "tool_execution_start", 
+      // Nota: algunos frontends inyectan un mensaje tipo "te envío..." al iniciar una tool.
+      // Para `send_email` lo evitamos porque ya existe un anuncio pre-tool y una confirmación post-tool.
+      const suppressAutoAssistantMessage = actionType === "send_email";
+      const toolExecutionStartPayload = {
+        type: "tool_execution_start",
         toolName: name,
         actionType: actionType,
         actionDetails: actionDetails,
+        // Backwards-compatible flags (por si el frontend no lee uiHints)
+        suppressAutoAssistantMessage,
         uiHints: {
-          // Para emails, el bot ya suele anunciarlo en su mensaje previo;
-          // evita que el frontend inyecte un segundo mensaje tipo "estoy preparando..."
-          suppressAutoAssistantMessage: actionType === "send_email"
+          suppressAutoAssistantMessage
         }
-      });
+      };
+      console.log("[TOOL_FLOW] tool_execution_start -> frontend:", JSON.stringify(toolExecutionStartPayload, null, 2));
+      safeSend(clientWs, toolExecutionStartPayload);
 
       // EJECUTAR HERRAMIENTA DIRECTAMENTE (sin validación previa como en el código original)
       console.log(`[TOOLS] Ejecutando herramienta directamente: ${name}`);

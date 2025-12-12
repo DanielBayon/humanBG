@@ -843,36 +843,43 @@ app.ws("/realtime-ws", (clientWs) => {
         
         const wasSuccessful = result?.status === "success";
         const actionLower = (args.orden || "").toLowerCase();
-        let confirmationInstruction = "";
-        
-        if (wasSuccessful) {
-          if (actionLower.includes("email") || actionLower.includes("correo") || actionLower.includes("mail")) {
-            confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ÉXITO - El email fue enviado correctamente]
 
-Confirma al usuario que el email YA FUE ENVIADO. Usa tiempo pasado. Ejemplo: "Listo, ya te envié el email. Revisa tu bandeja de entrada." 
-NO digas "estoy preparando" ni "te enviaré" porque YA se envió.`;
-          } else if (actionLower.includes("guardar") || actionLower.includes("guarda") || actionLower.includes("registra") || actionLower.includes("contacto")) {
-            confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ÉXITO - Los datos fueron guardados]
+        // ✅ Caso especial: envío de email -> confirmación determinística (evita el mensaje extra tipo "procedo...")
+        if (wasSuccessful && (actionLower.includes("email") || actionLower.includes("correo") || actionLower.includes("mail"))) {
+          const recipient = (args.orden || "").match(/[\w.-]+@[\w.-]+\.\w+/)?.[0];
+          const confirmationText = recipient
+            ? `¡Listo! Ya te envié el email con la información a ${recipient}. Revisa tu bandeja de entrada.`
+            : "¡Listo! Ya te envié el email con la información. Revisa tu bandeja de entrada.";
 
-Confirma brevemente que los datos YA se guardaron.`;
-          } else if (actionLower.includes("llamada") || actionLower.includes("callback")) {
-            confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ÉXITO - La solicitud fue registrada]
-
-Confirma brevemente que la solicitud YA se registró.`;
-          } else {
-            confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ÉXITO]
-
-Confirma brevemente que la acción YA se realizó.`;
-          }
+          console.log(`[TOOL CONFIRMATION] Confirmación determinística de email para ${recipient || "(sin email detectado)"}`);
+          await commitAssistantFinal(confirmationText, { supervise: false });
         } else {
-          confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ERROR - ${result?.message || 'Hubo un problema'}]
+          let confirmationInstruction = "";
+
+          if (wasSuccessful) {
+            if (actionLower.includes("guardar") || actionLower.includes("guarda") || actionLower.includes("registra") || actionLower.includes("contacto")) {
+              confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ÉXITO - Los datos fueron guardados]
+
+Confirma brevemente que los datos YA se guardaron (1 frase).`;
+            } else if (actionLower.includes("llamada") || actionLower.includes("callback")) {
+              confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ÉXITO - La solicitud fue registrada]
+
+Confirma brevemente que la solicitud YA se registró (1 frase).`;
+            } else {
+              confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ÉXITO]
+
+Confirma brevemente que la acción YA se realizó (1 frase).`;
+            }
+          } else {
+            confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ERROR - ${result?.message || 'Hubo un problema'}]
 
 Discúlpate brevemente por el error y ofrece ayuda.`;
+          }
+
+          // Generar respuesta de confirmación directamente, sin enviar functionResponse separado
+          console.log(`[TOOL CONFIRMATION] Generando confirmación directa para ${name}`);
+          await getGeminiResponse(confirmationInstruction);
         }
-        
-        // Generar respuesta de confirmación directamente, sin enviar functionResponse separado
-        console.log(`[TOOL CONFIRMATION] Generando confirmación directa para ${name}`);
-        await getGeminiResponse(confirmationInstruction);
       }
 
       // Actualizar transcript con ejecución de herramienta

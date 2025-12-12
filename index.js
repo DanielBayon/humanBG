@@ -832,35 +832,47 @@ app.ws("/realtime-ws", (clientWs) => {
       
       if (silentToolsComplete.includes(name)) {
         console.log(`[TOOLS] Herramienta completamente silenciosa "${name}" - no se envía respuesta a Gemini`);
-      } else {
-        // Primero enviamos el resultado de la herramienta a Gemini (sin stream)
+      } else if (silentToolsNoFollowUp.includes(name)) {
+        // Para herramientas silenciosas parciales, solo enviamos el resultado sin generar respuesta
         await sendFunctionResponseToGemini(name, result, { streamResponse: false });
+        console.log(`[TOOLS] Herramienta silenciosa parcial "${name}" - resultado enviado sin follow-up`);
+      } else {
+        // Para ejecutar_orden_n8n y otras herramientas que necesitan confirmación:
+        // NO enviamos functionResponse separado, sino que incluimos el resultado en el prompt de confirmación
+        // Esto evita que Gemini genere una respuesta intermedia
         
-        // Ahora generamos la respuesta de confirmación según el tipo de acción
         const wasSuccessful = result?.status === "success";
+        const actionLower = (args.orden || "").toLowerCase();
+        let confirmationInstruction = "";
         
-        if (!silentToolsNoFollowUp.includes(name)) {
-          const actionLower = (args.orden || "").toLowerCase();
-          let confirmationInstruction = "";
-          
-          if (wasSuccessful) {
-            if (actionLower.includes("email") || actionLower.includes("correo") || actionLower.includes("mail")) {
-              confirmationInstruction = `El sistema acaba de enviar el email exitosamente. Responde AL USUARIO confirmando que el email YA FUE ENVIADO. Usa tiempo pasado. Ejemplo: "Listo, ya te envié el email. Revisa tu bandeja de entrada." NO digas que lo vas a enviar o que lo estás preparando porque YA se envió.`;
-            } else if (actionLower.includes("guardar") || actionLower.includes("guarda") || actionLower.includes("registra") || actionLower.includes("contacto")) {
-              confirmationInstruction = `El sistema acaba de guardar los datos exitosamente. Confirma brevemente que YA se guardaron.`;
-            } else if (actionLower.includes("llamada") || actionLower.includes("callback")) {
-              confirmationInstruction = `El sistema acaba de registrar la solicitud de llamada. Confirma brevemente que YA se registró.`;
-            } else {
-              confirmationInstruction = `La acción se completó exitosamente. Confirma brevemente que YA se realizó.`;
-            }
+        if (wasSuccessful) {
+          if (actionLower.includes("email") || actionLower.includes("correo") || actionLower.includes("mail")) {
+            confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ÉXITO - El email fue enviado correctamente]
+
+Confirma al usuario que el email YA FUE ENVIADO. Usa tiempo pasado. Ejemplo: "Listo, ya te envié el email. Revisa tu bandeja de entrada." 
+NO digas "estoy preparando" ni "te enviaré" porque YA se envió.`;
+          } else if (actionLower.includes("guardar") || actionLower.includes("guarda") || actionLower.includes("registra") || actionLower.includes("contacto")) {
+            confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ÉXITO - Los datos fueron guardados]
+
+Confirma brevemente que los datos YA se guardaron.`;
+          } else if (actionLower.includes("llamada") || actionLower.includes("callback")) {
+            confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ÉXITO - La solicitud fue registrada]
+
+Confirma brevemente que la solicitud YA se registró.`;
           } else {
-            confirmationInstruction = `Hubo un error al ejecutar la acción. Discúlpate brevemente y ofrece ayuda.`;
+            confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ÉXITO]
+
+Confirma brevemente que la acción YA se realizó.`;
           }
-          
-          // Generar respuesta de confirmación usando getGeminiResponse
-          console.log(`[TOOL CONFIRMATION] Generando confirmación: ${confirmationInstruction}`);
-          await getGeminiResponse(confirmationInstruction);
+        } else {
+          confirmationInstruction = `[RESULTADO DE HERRAMIENTA "${name}": ERROR - ${result?.message || 'Hubo un problema'}]
+
+Discúlpate brevemente por el error y ofrece ayuda.`;
         }
+        
+        // Generar respuesta de confirmación directamente, sin enviar functionResponse separado
+        console.log(`[TOOL CONFIRMATION] Generando confirmación directa para ${name}`);
+        await getGeminiResponse(confirmationInstruction);
       }
 
       // Actualizar transcript con ejecución de herramienta

@@ -833,61 +833,33 @@ app.ws("/realtime-ws", (clientWs) => {
       if (silentToolsComplete.includes(name)) {
         console.log(`[TOOLS] Herramienta completamente silenciosa "${name}" - no se envía respuesta a Gemini`);
       } else {
-        // Generar prompt de confirmación según el tipo de acción
-        let confirmationPrompt = null;
+        // Primero enviamos el resultado de la herramienta a Gemini (sin stream)
+        await sendFunctionResponseToGemini(name, result, { streamResponse: false });
+        
+        // Ahora generamos la respuesta de confirmación según el tipo de acción
         const wasSuccessful = result?.status === "success";
         
         if (!silentToolsNoFollowUp.includes(name)) {
           const actionLower = (args.orden || "").toLowerCase();
+          let confirmationInstruction = "";
           
           if (wasSuccessful) {
             if (actionLower.includes("email") || actionLower.includes("correo") || actionLower.includes("mail")) {
-              confirmationPrompt = `[RESULTADO DE HERRAMIENTA: ÉXITO - El email YA FUE ENVIADO correctamente.]
-
-INSTRUCCIÓN OBLIGATORIA: Responde ÚNICAMENTE con una confirmación en PASADO de que el email YA se envió. 
-- CORRECTO: "Listo, ya te he enviado el email. Revisa tu bandeja de entrada."
-- INCORRECTO: "Estoy preparando el email" o "Te enviaré el email"
-NO repitas lo que dijiste antes. NO menciones el contenido del email. Solo confirma que YA se envió.`;
+              confirmationInstruction = `El sistema acaba de enviar el email exitosamente. Responde AL USUARIO confirmando que el email YA FUE ENVIADO. Usa tiempo pasado. Ejemplo: "Listo, ya te envié el email. Revisa tu bandeja de entrada." NO digas que lo vas a enviar o que lo estás preparando porque YA se envió.`;
             } else if (actionLower.includes("guardar") || actionLower.includes("guarda") || actionLower.includes("registra") || actionLower.includes("contacto")) {
-              confirmationPrompt = `[RESULTADO DE HERRAMIENTA: ÉXITO - Los datos YA FUERON GUARDADOS.]
-
-INSTRUCCIÓN: Confirma brevemente que los datos ya se guardaron. Una sola frase.`;
+              confirmationInstruction = `El sistema acaba de guardar los datos exitosamente. Confirma brevemente que YA se guardaron.`;
             } else if (actionLower.includes("llamada") || actionLower.includes("callback")) {
-              confirmationPrompt = `[RESULTADO DE HERRAMIENTA: ÉXITO - La solicitud de llamada YA FUE REGISTRADA.]
-
-INSTRUCCIÓN: Confirma brevemente que la solicitud ya fue registrada. Una sola frase.`;
+              confirmationInstruction = `El sistema acaba de registrar la solicitud de llamada. Confirma brevemente que YA se registró.`;
             } else {
-              confirmationPrompt = `[RESULTADO DE HERRAMIENTA: ÉXITO - La acción YA SE COMPLETÓ.]
-
-INSTRUCCIÓN: Confirma brevemente que la acción ya se realizó. Una sola frase.`;
+              confirmationInstruction = `La acción se completó exitosamente. Confirma brevemente que YA se realizó.`;
             }
           } else {
-            confirmationPrompt = `[RESULTADO DE HERRAMIENTA: ERROR - Hubo un problema.]
-
-INSTRUCCIÓN: Discúlpate brevemente por el error y ofrece ayuda.`;
+            confirmationInstruction = `Hubo un error al ejecutar la acción. Discúlpate brevemente y ofrece ayuda.`;
           }
-        }
-        
-        // Enviar resultado a Gemini con stream para generar respuesta de confirmación
-        const streamResult = await sendFunctionResponseToGemini(name, result, { 
-          streamResponse: !silentToolsNoFollowUp.includes(name), 
-          confirmationPrompt 
-        });
-        
-        // Si tenemos stream, procesarlo y enviarlo al cliente
-        if (streamResult && !silentToolsNoFollowUp.includes(name)) {
-          let followText = "";
-          for await (const chunk of streamResult.stream) {
-            const part = chunk.candidates?.[0]?.content?.parts?.[0]?.text || "";
-            if (part) {
-              followText += part;
-              safeSend(clientWs, { type: "audio_transcript", role: "assistant", content: part, isFinal: false });
-            }
-          }
-          if (followText.trim()) {
-            fullConversationTranscript += `\n\nAgente: ${followText}`;
-            safeSend(clientWs, { type: "audio_transcript", role: "assistant", content: followText, isFinal: true });
-          }
+          
+          // Generar respuesta de confirmación usando getGeminiResponse
+          console.log(`[TOOL CONFIRMATION] Generando confirmación: ${confirmationInstruction}`);
+          await getGeminiResponse(confirmationInstruction);
         }
       }
 

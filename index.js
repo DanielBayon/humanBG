@@ -801,7 +801,12 @@ app.ws("/realtime-ws", (clientWs) => {
         type: "tool_execution_start", 
         toolName: name,
         actionType: actionType,
-        actionDetails: actionDetails
+        actionDetails: actionDetails,
+        uiHints: {
+          // Para emails, el bot ya suele anunciarlo en su mensaje previo;
+          // evita que el frontend inyecte un segundo mensaje tipo "estoy preparando..."
+          suppressAutoAssistantMessage: actionType === "send_email"
+        }
       });
 
       // EJECUTAR HERRAMIENTA DIRECTAMENTE (sin validación previa como en el código original)

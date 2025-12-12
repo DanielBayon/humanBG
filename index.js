@@ -825,14 +825,57 @@ app.ws("/realtime-ws", (clientWs) => {
       console.log(`[TOOL EXECUTION] Resultado de ${name}:`, JSON.stringify(result, null, 2));
       safeSend(clientWs, { type: "tool_execution_end", toolName: name, success: result?.status === "success" });
 
-      // Herramientas silenciosas: no envían respuesta a Gemini
-      const silentToolsNoGeminiResponse = ["navegar_web"];
+      // Herramientas completamente silenciosas: no envían nada a Gemini ni generan follow-up
+      const silentToolsComplete = ["navegar_web"];
+      // Herramientas silenciosas parciales: envían a Gemini pero no generan follow-up adicional
+      const silentToolsNoFollowUp = ["abrir_modal_agendamiento"];
       
-      if (!silentToolsNoGeminiResponse.includes(name)) {
-        // Entregar la salida de la herramienta al modelo (functionResponse)
-        await sendFunctionResponseToGemini(name, result);
+      if (silentToolsComplete.includes(name)) {
+        console.log(`[TOOLS] Herramienta completamente silenciosa "${name}" - no se envía respuesta a Gemini`);
       } else {
-        console.log(`[TOOLS] Herramienta silenciosa "${name}" - no se envía respuesta a Gemini`);
+        // Generar prompt de confirmación según el tipo de acción
+        let confirmationPrompt = null;
+        const wasSuccessful = result?.status === "success";
+        
+        if (!silentToolsNoFollowUp.includes(name)) {
+          const actionLower = (args.orden || "").toLowerCase();
+          
+          if (wasSuccessful) {
+            if (actionLower.includes("email") || actionLower.includes("correo") || actionLower.includes("mail")) {
+              confirmationPrompt = `[SISTEMA: El email se envió correctamente. Responde con UNA SOLA frase breve de confirmación como "Listo, el email ha sido enviado. Revisa tu bandeja de entrada." No repitas el contenido del email.]`;
+            } else if (actionLower.includes("guardar") || actionLower.includes("guarda") || actionLower.includes("registra") || actionLower.includes("contacto")) {
+              confirmationPrompt = `[SISTEMA: Los datos se guardaron correctamente. Responde con UNA SOLA frase breve de confirmación.]`;
+            } else if (actionLower.includes("llamada") || actionLower.includes("callback")) {
+              confirmationPrompt = `[SISTEMA: La solicitud de llamada se registró. Responde con UNA SOLA frase breve de confirmación.]`;
+            } else {
+              confirmationPrompt = `[SISTEMA: La acción se completó. Responde con UNA SOLA frase breve de confirmación.]`;
+            }
+          } else {
+            confirmationPrompt = `[SISTEMA: Hubo un problema con la acción. Discúlpate brevemente.]`;
+          }
+        }
+        
+        // Enviar resultado a Gemini con stream para generar respuesta de confirmación
+        const streamResult = await sendFunctionResponseToGemini(name, result, { 
+          streamResponse: !silentToolsNoFollowUp.includes(name), 
+          confirmationPrompt 
+        });
+        
+        // Si tenemos stream, procesarlo y enviarlo al cliente
+        if (streamResult && !silentToolsNoFollowUp.includes(name)) {
+          let followText = "";
+          for await (const chunk of streamResult.stream) {
+            const part = chunk.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            if (part) {
+              followText += part;
+              safeSend(clientWs, { type: "audio_transcript", role: "assistant", content: part, isFinal: false });
+            }
+          }
+          if (followText.trim()) {
+            fullConversationTranscript += `\n\nAgente: ${followText}`;
+            safeSend(clientWs, { type: "audio_transcript", role: "assistant", content: followText, isFinal: true });
+          }
+        }
       }
 
       // Actualizar transcript con ejecución de herramienta
@@ -864,17 +907,6 @@ app.ws("/realtime-ws", (clientWs) => {
       currentUserTranscript = "";
       isCorrecting = false;
 
-      // Herramientas silenciosas: no generan follow-up ni respuesta de Gemini
-      const silentTools = ["abrir_modal_agendamiento", "navegar_web"];
-      
-      if (silentTools.includes(name)) {
-        // Para herramientas silenciosas, no generar réplica post-tool
-        console.log(`[TOOL_FLOW] Herramienta silenciosa "${name}" completada. Sin follow-up.`);
-      } else {
-        // Para otras herramientas, generar réplica post-tool
-        await streamFollowUpAfterTool(result?.status === "success", name, args.orden);
-      }
-
     } catch (err) {
       console.error("[TOOL-FLOW ERROR]", err);
       safeSend(clientWs, { type: "tool_execution_end", toolName: functionCall?.name || "herramienta", success: false });
@@ -886,10 +918,10 @@ app.ws("/realtime-ws", (clientWs) => {
     }
   }
 
-  async function sendFunctionResponseToGemini(name, payload) {
+  async function sendFunctionResponseToGemini(name, payload, options = {}) {
+    const { streamResponse = false, confirmationPrompt = null } = options;
     try {
       // Formato correcto para Vertex AI Gemini según documentación actual
-      // El response debe incluir { name, content } según SDK de Node
       const functionResponseParts = [{
         functionResponse: {
           name: name,
@@ -900,10 +932,23 @@ app.ws("/realtime-ws", (clientWs) => {
         }
       }];
       
-      const result = await geminiChat.sendMessage(functionResponseParts);
-      console.log(`[TOOLS] Respuesta enviada a Gemini para herramienta ${name}`);
+      // Si hay un prompt de confirmación, agregarlo como texto adicional
+      // Esto hace que Gemini reciba el resultado Y las instrucciones de cómo responder en un solo mensaje
+      if (confirmationPrompt) {
+        functionResponseParts.push({ text: confirmationPrompt });
+      }
       
-      return result;
+      if (streamResponse) {
+        // Enviar y hacer stream de la respuesta de Gemini
+        const result = await geminiChat.sendMessageStream(functionResponseParts);
+        console.log(`[TOOLS] Respuesta enviada a Gemini para herramienta ${name} (con stream)`);
+        return result;
+      } else {
+        // Solo enviar, sin procesar respuesta (se manejará después)
+        const result = await geminiChat.sendMessage(functionResponseParts);
+        console.log(`[TOOLS] Respuesta enviada a Gemini para herramienta ${name}`);
+        return result;
+      }
     } catch (error) {
       console.error("[TOOLS] Error enviando respuesta a Gemini:", error);
       // Fallback: enviar como mensaje de texto simple
@@ -927,14 +972,30 @@ app.ws("/realtime-ws", (clientWs) => {
 
     let followText = "";
     try {
-      // Si la herramienta fue exitosa, agregar contexto de confirmación
+      // Prompt específico según el resultado y tipo de acción
+      // Este prompt guía a Gemini para dar una respuesta BREVE de confirmación
       let promptMessage = "";
-      if (wasSuccessful && actionPerformed) {
-        promptMessage = `La acción "${actionPerformed}" se ha completado exitosamente. Confirma al usuario que se realizó correctamente y continúa la conversación naturalmente.`;
-        console.log(`[GEMINI FOLLOW] Enviando contexto de éxito: ${promptMessage}`);
+      
+      if (wasSuccessful) {
+        // Detectar tipo de acción para dar instrucciones más precisas
+        const actionLower = (actionPerformed || "").toLowerCase();
+        
+        if (actionLower.includes("email") || actionLower.includes("correo") || actionLower.includes("mail")) {
+          promptMessage = `[SISTEMA: El email se envió correctamente. Da SOLO una confirmación breve de 1 frase como "Listo, el email ha sido enviado. Revisa tu bandeja de entrada." y si quieres pregunta si necesita algo más. NO repitas el contenido del email ni lo que ibas a enviar.]`;
+        } else if (actionLower.includes("guardar") || actionLower.includes("guarda") || actionLower.includes("registra") || actionLower.includes("contacto")) {
+          promptMessage = `[SISTEMA: Los datos se guardaron correctamente. Da SOLO una confirmación breve de 1 frase y continúa.]`;
+        } else if (actionLower.includes("llamada") || actionLower.includes("callback")) {
+          promptMessage = `[SISTEMA: La solicitud de llamada se registró. Da SOLO una confirmación breve.]`;
+        } else {
+          promptMessage = `[SISTEMA: La acción se completó con éxito. Da una confirmación MUY BREVE (1 frase máximo).]`;
+        }
+      } else {
+        promptMessage = `[SISTEMA: Hubo un problema con la acción. Discúlpate brevemente y ofrece ayuda.]`;
       }
       
-      const follow = await geminiChat.sendMessageStream(promptMessage); // trigger del turno post-herramienta
+      console.log(`[GEMINI FOLLOW] Enviando prompt: ${promptMessage}`);
+      
+      const follow = await geminiChat.sendMessageStream([{ text: promptMessage }]);
       
       for await (const chunk of follow.stream) {
         // Verificar que chunk existe y tiene candidates

@@ -1498,6 +1498,7 @@ INSTRUCCIÓN: Discúlpate brevemente por el error y ofrece ayuda.`;
 
         case "user_action_completed": {
           console.log(`[DEBUG] Recibido user_action_completed. isPausedForUserAction: ${isPausedForUserAction}`);
+          console.log(`[DEBUG] Mensaje completo:`, JSON.stringify(msg, null, 2));
           
           // 🚨 CRÍTICO: Si no está pausado, significa que el webhook ya procesó o está procesando.
           // IGNORAR COMPLETAMENTE para evitar la condición de carrera.
@@ -1509,12 +1510,16 @@ INSTRUCCIÓN: Discúlpate brevemente por el error y ofrece ayuda.`;
           // Si llegamos aquí, el webhook no se ha ejecutado. Este es el flujo de fallback.
           console.log("✅ [USER_ACTION] Procesando user_action_completed como fallback (el webhook no llegó).");
           isPausedForUserAction = false;
+          
+          // Detectar si el usuario cerró sin agendar usando el details del frontend
+          const userClosedWithoutBooking = msg.details === "Usuario cerró sin agendar." || 
+                                           (!msg.appointmentData?.startTime && !msg.appointmentData?.start?.time);
 
           let systemText;
           
           // Lógica para obtener datos de la cita (si existen) y formular el systemText
-          // Esta parte es ahora un fallback y puede que no tenga datos si el usuario simplemente cerró el modal.
-          if (msg.appointmentData && (msg.appointmentData.startTime || (msg.appointmentData.start && msg.appointmentData.start.time))) {
+          if (!userClosedWithoutBooking && msg.appointmentData) {
+            // Usuario SÍ agendó una cita
             const startISO = msg.appointmentData.startTime || msg.appointmentData.start?.time || null;
             const title = msg.appointmentData.eventName || msg.appointmentData.title || "Tu cita";
             const fechaLegible = startISO
@@ -1531,29 +1536,33 @@ INSTRUCCIÓN: Discúlpate brevemente por el error y ofrece ayuda.`;
 2) Indica que recibirá un email con los detalles.
 3) Pregunta si necesita algo más.`;
           } else {
-             systemText = `[SISTEMA: El usuario cerró la ventana de agendamiento sin seleccionar una cita.]
+            // Usuario cerró SIN agendar
+            console.log(`[USER_ACTION] Usuario cerró la agenda sin agendar. Details: "${msg.details}"`);
+            systemText = `[EVENTO DEL SISTEMA: El frontend acaba de informar que el usuario CERRÓ la ventana de agendamiento SIN seleccionar ninguna cita. El mensaje del frontend fue: "${msg.details || 'Usuario cerró sin agendar.'}"]
 
-🚨 INSTRUCCIONES OBLIGATORIAS - LEE CON ATENCIÓN:
-1) PROHIBIDO llamar a la herramienta abrir_modal_agendamiento. NO la llames.
-2) PROHIBIDO decir que vas a abrir o mostrar la agenda/calendario.
-3) Simplemente comenta que notaste que cerró la ventana.
-4) Ofrece que SI EL USUARIO LO PIDE, puedes volver a mostrársela.
-5) Deja claro que si prefiere hacerlo en otro momento, no hay problema.
-6) Pregunta en qué más puedes ayudar.
+CONTEXTO: El usuario tenía abierta la ventana para agendar una cita pero la cerró sin elegir ningún horario. Esto puede ser porque:
+- Cambió de opinión
+- No encontró un horario que le convenga
+- Fue un error y quiere volver a intentarlo
 
-RESPUESTA CORRECTA (ejemplo): "Veo que cerraste la ventana de agendado. Si fue un error y quieres que te la muestre de nuevo, solo dímelo. Si prefieres agendar en otro momento, no hay problema. ¿En qué más puedo ayudarte?"
+TU RESPUESTA DEBE:
+1) Reconocer amablemente que cerró la ventana (sin juzgar)
+2) Ofrecer que si quiere volver a ver los horarios, solo tiene que pedírtelo
+3) Dejar claro que no hay problema si prefiere hacerlo en otro momento
+4) Preguntar en qué más puedes ayudar
 
-RESPUESTA INCORRECTA (NO hagas esto): "Claro, te abro de nuevo la agenda..." o "Te muestro el calendario..."`;
+EJEMPLO: "Veo que cerraste la ventana de agendado. Si fue un error o quieres volver a ver los horarios disponibles, solo dímelo. Si prefieres agendar en otro momento, no hay ningún problema. ¿Hay algo más en lo que pueda ayudarte?"
+
+⚠️ IMPORTANTE: NO llames a ninguna herramienta en esta respuesta. Solo responde con texto.`;
           }
 
           // Inyectar y responder
-          console.log(`[USER_ACTION] Enviando mensaje de sistema a Gemini: ${systemText}`);
-          await geminiChat.sendMessage([{
-            text: systemText
-          }]);
+          console.log(`[USER_ACTION] Enviando mensaje de sistema a Gemini`);
+          console.log(`[USER_ACTION] userClosedWithoutBooking: ${userClosedWithoutBooking}`);
           
-          // Generar respuesta
-          await getGeminiResponse("Ok, procede.");
+          // Usamos getGeminiResponse que maneja todo el flujo correctamente
+          await geminiChat.sendMessage([{ text: systemText }]);
+          await getGeminiResponse("Responde al usuario según las instrucciones anteriores.");
 
           break;
         }

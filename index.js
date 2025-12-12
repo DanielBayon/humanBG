@@ -842,16 +842,29 @@ app.ws("/realtime-ws", (clientWs) => {
           
           if (wasSuccessful) {
             if (actionLower.includes("email") || actionLower.includes("correo") || actionLower.includes("mail")) {
-              confirmationPrompt = `[SISTEMA: El email se envió correctamente. Responde con UNA SOLA frase breve de confirmación como "Listo, el email ha sido enviado. Revisa tu bandeja de entrada." No repitas el contenido del email.]`;
+              confirmationPrompt = `[RESULTADO DE HERRAMIENTA: ÉXITO - El email YA FUE ENVIADO correctamente.]
+
+INSTRUCCIÓN OBLIGATORIA: Responde ÚNICAMENTE con una confirmación en PASADO de que el email YA se envió. 
+- CORRECTO: "Listo, ya te he enviado el email. Revisa tu bandeja de entrada."
+- INCORRECTO: "Estoy preparando el email" o "Te enviaré el email"
+NO repitas lo que dijiste antes. NO menciones el contenido del email. Solo confirma que YA se envió.`;
             } else if (actionLower.includes("guardar") || actionLower.includes("guarda") || actionLower.includes("registra") || actionLower.includes("contacto")) {
-              confirmationPrompt = `[SISTEMA: Los datos se guardaron correctamente. Responde con UNA SOLA frase breve de confirmación.]`;
+              confirmationPrompt = `[RESULTADO DE HERRAMIENTA: ÉXITO - Los datos YA FUERON GUARDADOS.]
+
+INSTRUCCIÓN: Confirma brevemente que los datos ya se guardaron. Una sola frase.`;
             } else if (actionLower.includes("llamada") || actionLower.includes("callback")) {
-              confirmationPrompt = `[SISTEMA: La solicitud de llamada se registró. Responde con UNA SOLA frase breve de confirmación.]`;
+              confirmationPrompt = `[RESULTADO DE HERRAMIENTA: ÉXITO - La solicitud de llamada YA FUE REGISTRADA.]
+
+INSTRUCCIÓN: Confirma brevemente que la solicitud ya fue registrada. Una sola frase.`;
             } else {
-              confirmationPrompt = `[SISTEMA: La acción se completó. Responde con UNA SOLA frase breve de confirmación.]`;
+              confirmationPrompt = `[RESULTADO DE HERRAMIENTA: ÉXITO - La acción YA SE COMPLETÓ.]
+
+INSTRUCCIÓN: Confirma brevemente que la acción ya se realizó. Una sola frase.`;
             }
           } else {
-            confirmationPrompt = `[SISTEMA: Hubo un problema con la acción. Discúlpate brevemente.]`;
+            confirmationPrompt = `[RESULTADO DE HERRAMIENTA: ERROR - Hubo un problema.]
+
+INSTRUCCIÓN: Discúlpate brevemente por el error y ofrece ayuda.`;
           }
         }
         

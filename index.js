@@ -90,10 +90,71 @@ try {
   speechClient = new SpeechClient();
   console.log("✔️ SpeechClient inicializado.");
 
+  const vertexProject = process.env.GOOGLE_PROJECT_ID || "botgpt-a284d";
+  const envVertexLocation = process.env.GOOGLE_LOCATION;
+  // Por defecto este proyecto trabaja con endpoint/global. Si existe una GOOGLE_LOCATION
+  // vieja (ej: "us-central1"), puede romper el flujo. Permitimos volver a habilitar
+  // regiones con VERTEX_REQUIRE_GLOBAL=false.
+  const requireGlobal = String(process.env.VERTEX_REQUIRE_GLOBAL || "true").toLowerCase() !== "false";
+  const envVertexLocationNorm = String(envVertexLocation || "").toLowerCase();
+  const vertexLocation =
+    requireGlobal
+      ? "global"
+      : (envVertexLocation || "global");
+  const vertexLocationNorm = String(vertexLocation).toLowerCase();
+
+  if (requireGlobal && envVertexLocation && envVertexLocationNorm !== "global") {
+    console.warn(
+      `[CONFIG] GOOGLE_LOCATION="${envVertexLocation}" ignorado; usando location="global". ` +
+        `Si necesitas usar región, define VERTEX_REQUIRE_GLOBAL=false.`
+    );
+  }
+  // IMPORTANTE: con location="global", el SDK arma por defecto el host como
+  // "global-aiplatform.googleapis.com" (regionalizado) y eso puede devolver HTML.
+  // Para global debemos usar el endpoint base sin prefijo regional.
+  const envApiEndpoint = process.env.VERTEX_API_ENDPOINT;
+  const forceEnvApiEndpoint = String(process.env.VERTEX_API_ENDPOINT_FORCE || "").toLowerCase() === "true";
+  const expectedRegionalHost = `${vertexLocationNorm}-aiplatform.googleapis.com`;
+  const defaultGlobalHost = "aiplatform.googleapis.com";
+
+  let vertexApiEndpoint;
+  if (envApiEndpoint) {
+    // Evita errores al reutilizar variables de entorno entre despliegues/regiones.
+    // Si el endpoint no corresponde con la location actual, lo ignoramos (salvo FORCE).
+    const envHost = String(envApiEndpoint).toLowerCase();
+    const isEnvGlobalHost = envHost === defaultGlobalHost;
+    const isEnvRegionalHostForLocation = envHost === expectedRegionalHost;
+
+    const isConsistent =
+      vertexLocationNorm === "global"
+        ? isEnvGlobalHost
+        : (isEnvRegionalHostForLocation || isEnvGlobalHost);
+
+    if (forceEnvApiEndpoint || isConsistent) {
+      vertexApiEndpoint = envApiEndpoint;
+    } else {
+      console.warn(
+        `[CONFIG] Ignorando VERTEX_API_ENDPOINT="${envApiEndpoint}" por inconsistencia con GOOGLE_LOCATION="${vertexLocation}". ` +
+          `Esperado: "${vertexLocationNorm === "global" ? defaultGlobalHost : expectedRegionalHost}". ` +
+          `Si quieres forzarlo, usa VERTEX_API_ENDPOINT_FORCE=true.`
+      );
+    }
+  }
+
+  if (!vertexApiEndpoint && vertexLocationNorm === "global") {
+    vertexApiEndpoint = defaultGlobalHost;
+  }
+
   vertexAI = new VertexAI({
-    project: process.env.GOOGLE_PROJECT_ID || "botgpt-a284d",
-    location: process.env.GOOGLE_LOCATION || "global",
+    project: vertexProject,
+    location: vertexLocation,
+    ...(vertexApiEndpoint ? { apiEndpoint: vertexApiEndpoint } : {}),
   });
+
+  console.log(
+    `[CONFIG] VertexAI → project=${vertexProject} location=${vertexLocation}` +
+      (vertexApiEndpoint ? ` apiEndpoint=${vertexApiEndpoint}` : "")
+  );
   
   // Verificar que el modelo esté disponible
   try {

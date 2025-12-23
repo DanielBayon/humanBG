@@ -570,6 +570,23 @@ app.ws("/realtime-ws", (clientWs) => {
   let currentUserTranscript = "";
   let currentUserInputSource = "voice";
   let isCorrecting = false;
+
+  // Contexto interno (no se envía al frontend): útil para que el modelo
+  // recuerde acciones silenciosas (ej: navegar_web) y confirmaciones determinísticas.
+  const internalContextNotes = [];
+  const pushInternalContext = (note) => {
+    const clean = String(note || "").trim();
+    if (!clean) return;
+    internalContextNotes.push(clean);
+    // Mantenerlo acotado para no inflar el prompt.
+    while (internalContextNotes.length > 15) internalContextNotes.shift();
+  };
+  const buildModelInputWithContext = (userText) => {
+    const txt = (userText ?? "").toString();
+    if (internalContextNotes.length === 0) return txt;
+    const ctx = internalContextNotes.map((n) => `- ${n}`).join("\n");
+    return `[Contexto interno del sistema: acciones recientes]\n${ctx}\n\n${txt}`;
+  };
   
   // Estado de deduplicación de reservas por conexión
   let lastBookingIdProcessed = null;
@@ -727,7 +744,8 @@ app.ws("/realtime-ws", (clientWs) => {
     let toolAlreadyHandledThisTurn = false;
 
     try {
-      const result = await geminiChat.sendMessageStream(userText || " ");
+      const modelInput = buildModelInputWithContext(userText || " ");
+      const result = await geminiChat.sendMessageStream(modelInput);
 
       for await (const chunk of result.stream) {
         // Verificar que chunk existe y tiene candidates
@@ -902,6 +920,11 @@ app.ws("/realtime-ws", (clientWs) => {
       console.log(`[TOOL EXECUTION] Resultado de ${name}:`, JSON.stringify(result, null, 2));
       safeSend(clientWs, { type: "tool_execution_end", toolName: name, success: result?.status === "success" });
 
+      // Registrar acciones silenciosas / relevantes para el modelo.
+      if (name === "navegar_web" && args?.seccion_tag) {
+        pushInternalContext(`Navegación web realizada: seccion_tag="${args.seccion_tag}".`);
+      }
+
       // Herramientas completamente silenciosas: no envían nada a Gemini ni generan follow-up
       const silentToolsComplete = ["navegar_web"];
       // Herramientas silenciosas parciales: envían a Gemini pero no generan follow-up adicional
@@ -930,6 +953,11 @@ app.ws("/realtime-ws", (clientWs) => {
 
           console.log(`[TOOL CONFIRMATION] Confirmación determinística de email para ${recipient || "(sin email detectado)"}`);
           await commitAssistantFinal(confirmationText, { supervise: false });
+          pushInternalContext(
+            recipient
+              ? `Email enviado correctamente a ${recipient} (confirmación determinística del servidor).`
+              : "Email enviado correctamente (confirmación determinística del servidor)."
+          );
         } else {
           let confirmationInstruction = "";
 

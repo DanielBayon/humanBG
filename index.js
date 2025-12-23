@@ -92,20 +92,26 @@ try {
 
   vertexAI = new VertexAI({
     project: process.env.GOOGLE_PROJECT_ID || "botgpt-a284d",
-    location: process.env.GOOGLE_LOCATION || "us-central1",
+    location: process.env.GOOGLE_LOCATION || "global",
   });
   
   // Verificar que el modelo esté disponible
   try {
-    geminiModel = vertexAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-    console.log("✔️ VertexAI (Gemini 2.5 Flash) inicializado.");
+    geminiModel = vertexAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
+    console.log("✔️ VertexAI (Gemini 3 Flash Preview) inicializado.");
   } catch (modelError) {
-    console.warn("Modelo gemini-2.5-flash no disponible, intentando con gemini-pro...");
+    console.warn("Modelo gemini-3-flash-preview no disponible, intentando con gemini-2.5-flash...");
     try {
-      geminiModel = vertexAI.getGenerativeModel({ model: "gemini-pro" });
-      console.log("✔️ VertexAI (Gemini Pro) inicializado.");
-    } catch (fallbackError) {
-      throw new Error(`No se pudo inicializar ningún modelo de Gemini: ${fallbackError.message}`);
+      geminiModel = vertexAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+      console.log("✔️ VertexAI (Gemini 2.5 Flash) inicializado.");
+    } catch (fallback25Error) {
+      console.warn("Modelo gemini-2.5-flash no disponible, intentando con gemini-pro...");
+      try {
+        geminiModel = vertexAI.getGenerativeModel({ model: "gemini-pro" });
+        console.log("✔️ VertexAI (Gemini Pro) inicializado.");
+      } catch (fallbackError) {
+        throw new Error(`No se pudo inicializar ningún modelo de Gemini: ${fallbackError.message}`);
+      }
     }
   }
 

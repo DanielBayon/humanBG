@@ -810,12 +810,9 @@ app.ws("/realtime-ws", (clientWs) => {
         if (fullText.trim()) {
           await commitAssistantFinal(fullText, { supervise: false, clearUserTurn: false });
           fullText = "";
-        } else {
-          // Último recurso: navegación sin ningún texto generado.
-          if (pendingFunctionCall?.name === "navegar_web") {
-            await commitAssistantFinal("Perfecto, te llevo a esa sección.", { supervise: false, clearUserTurn: false });
-          }
         }
+        // No usamos mensaje predeterminado: el modelo siempre genera texto.
+        // Si excepcionalmente no lo hace, la tool se ejecuta en silencio.
         await handleFunctionCall(pendingFunctionCall);
         return;
       }

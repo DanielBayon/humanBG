@@ -647,7 +647,7 @@ app.ws("/realtime-ws", (clientWs) => {
   };
 
   // Helper para enviar assistant_final y persistir transcript
-  async function commitAssistantFinal(text, { supervise = true } = {}) {
+  async function commitAssistantFinal(text, { supervise = true, clearUserTurn = true } = {}) {
     const final = (text || "").trim();
     if (!final) return;
 
@@ -689,8 +689,10 @@ app.ws("/realtime-ws", (clientWs) => {
     }
 
     // Limpieza de flags de turno de usuario
-    currentUserTranscript = "";
-    isCorrecting = false;
+    if (clearUserTurn) {
+      currentUserTranscript = "";
+      isCorrecting = false;
+    }
   }
 
   async function onSpeechData(data) {
@@ -742,6 +744,7 @@ app.ws("/realtime-ws", (clientWs) => {
 
     let fullText = "";
     let toolAlreadyHandledThisTurn = false;
+    let pendingFunctionCall = null;
 
     try {
       const modelInput = buildModelInputWithContext(userText || " ");
@@ -791,26 +794,30 @@ app.ws("/realtime-ws", (clientWs) => {
             if (part && part.functionCall && !toolAlreadyHandledThisTurn) {
               toolAlreadyHandledThisTurn = true;
 
-              // ✅ CLAVE: cerrar el texto acumulado ANTES de ejecutar la tool
-              if (fullText.trim()) {
-                // No supervisamos este cierre pre-tool para evitar duplicación
-                // ya que la herramienta será reportada por separado
-                await commitAssistantFinal(fullText, { supervise: false });
-                fullText = ""; // Limpiar para evitar reutilización
-              }
-
-              const fc = part.functionCall;
-              console.log("[GEMINI] Function call detectada:", JSON.stringify(fc, null, 2));
-              
-              // Si hubiera múltiples function calls en el mismo candidate,
-              // aparecerían como parts adicionales con functionCall
-              // Por política actual, procesamos solo la primera
-              await handleFunctionCall(fc);
-              // Retornar aquí es correcto - la lógica post-tool está en handleFunctionCall
-              return;
+              // IMPORTANTE: no ejecutamos la tool inmediatamente.
+              // A veces el modelo emite el texto DESPUÉS del functionCall; si retornamos aquí,
+              // perderíamos ese texto y el usuario vería solo la navegación.
+              pendingFunctionCall = part.functionCall;
+              console.log("[GEMINI] Function call detectada (deferred):", JSON.stringify(pendingFunctionCall, null, 2));
             }
           }
         }
+      }
+
+      // Fin del stream.
+      // Si hubo functionCall, primero emitimos el texto (si existe) y luego ejecutamos la tool.
+      if (pendingFunctionCall) {
+        if (fullText.trim()) {
+          await commitAssistantFinal(fullText, { supervise: false, clearUserTurn: false });
+          fullText = "";
+        } else {
+          // Último recurso: navegación sin ningún texto generado.
+          if (pendingFunctionCall?.name === "navegar_web") {
+            await commitAssistantFinal("Perfecto, te llevo a esa sección.", { supervise: false, clearUserTurn: false });
+          }
+        }
+        await handleFunctionCall(pendingFunctionCall);
+        return;
       }
 
       // Fin del stream sin tools → cierre normal con supervisión

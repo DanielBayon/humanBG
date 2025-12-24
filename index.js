@@ -750,19 +750,25 @@ app.ws("/realtime-ws", (clientWs) => {
       const modelInput = buildModelInputWithContext(userText || " ");
       const result = await geminiChat.sendMessageStream(modelInput);
 
+      let chunkIndex = 0;
       for await (const chunk of result.stream) {
+        chunkIndex++;
+        
         // Verificar que chunk existe y tiene candidates
         if (!chunk || typeof chunk !== 'object') {
-          console.warn("[GEMINI] Chunk inválido:", chunk);
+          console.warn(`[GEMINI STREAM #${chunkIndex}] Chunk inválido:`, chunk);
           continue;
         }
 
+        // Log detallado del chunk para debugging
+        console.log(`[GEMINI STREAM #${chunkIndex}] Chunk recibido:`, JSON.stringify(chunk, null, 2));
+
         // Verificar finishReason y blockedReason para debugging
         if (chunk.finishReason) {
-          console.log(`[GEMINI] Finish reason: ${chunk.finishReason}`);
+          console.log(`[GEMINI STREAM #${chunkIndex}] Finish reason: ${chunk.finishReason}`);
         }
         if (chunk.blockedReason) {
-          console.warn(`[GEMINI] Blocked reason: ${chunk.blockedReason}`);
+          console.warn(`[GEMINI STREAM #${chunkIndex}] Blocked reason: ${chunk.blockedReason}`);
         }
 
         const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
@@ -770,20 +776,25 @@ app.ws("/realtime-ws", (clientWs) => {
         for (const cand of candidates) {
           // Verificar finishReason del candidato
           if (cand.finishReason) {
-            console.log(`[GEMINI] Candidate finish reason: ${cand.finishReason}`);
+            console.log(`[GEMINI STREAM #${chunkIndex}] Candidate finish reason: ${cand.finishReason}`);
           }
           
           // Verificar que el candidato tiene content y parts
           if (!cand || !cand.content || !Array.isArray(cand.content.parts)) {
-            console.warn("[GEMINI] Candidato sin parts válidas:", cand);
+            console.warn(`[GEMINI STREAM #${chunkIndex}] Candidato sin parts válidas:`, cand);
             continue;
           }
 
           const parts = cand.content.parts;
+          console.log(`[GEMINI STREAM #${chunkIndex}] Parts count: ${parts.length}`);
           
-          for (const part of parts) {
+          for (let partIdx = 0; partIdx < parts.length; partIdx++) {
+            const part = parts[partIdx];
+            console.log(`[GEMINI STREAM #${chunkIndex}] Part[${partIdx}] keys:`, Object.keys(part || {}));
+            
             // Texto del asistente (delta)
             if (part && typeof part.text === "string" && part.text.length > 0) {
+              console.log(`[GEMINI STREAM #${chunkIndex}] Part[${partIdx}] TEXT: "${part.text.substring(0, 100)}${part.text.length > 100 ? '...' : ''}"`);
               fullText += part.text;
               safeSend(clientWs, { type: "assistant_delta", delta: part.text });
             }
@@ -793,6 +804,7 @@ app.ws("/realtime-ws", (clientWs) => {
             // pero mantenemos política de "una por turno"
             if (part && part.functionCall && !toolAlreadyHandledThisTurn) {
               toolAlreadyHandledThisTurn = true;
+              console.log(`[GEMINI STREAM #${chunkIndex}] Part[${partIdx}] FUNCTION_CALL detectado`);
 
               // IMPORTANTE: no ejecutamos la tool inmediatamente.
               // A veces el modelo emite el texto DESPUÉS del functionCall; si retornamos aquí,
@@ -803,17 +815,25 @@ app.ws("/realtime-ws", (clientWs) => {
           }
         }
       }
+      
+      // Log resumen al final del stream
+      console.log(`[GEMINI STREAM END] Total chunks: ${chunkIndex}, fullText length: ${fullText.length}, hasFunctionCall: ${!!pendingFunctionCall}`);
+      if (fullText.trim()) {
+        console.log(`[GEMINI STREAM END] fullText preview: "${fullText.substring(0, 200)}${fullText.length > 200 ? '...' : ''}"`);
+      } else {
+        console.log(`[GEMINI STREAM END] ⚠️ NO TEXT CAPTURED - tool will execute silently`);
+      }
 
       // Fin del stream.
       // Si hubo functionCall, primero emitimos el texto (si existe) y luego ejecutamos la tool.
       if (pendingFunctionCall) {
-        if (fullText.trim()) {
+        const hadTextBeforeTool = !!fullText.trim();
+        if (hadTextBeforeTool) {
           await commitAssistantFinal(fullText, { supervise: false, clearUserTurn: false });
           fullText = "";
         }
-        // No usamos mensaje predeterminado: el modelo siempre genera texto.
-        // Si excepcionalmente no lo hace, la tool se ejecuta en silencio.
-        await handleFunctionCall(pendingFunctionCall);
+        // Pasamos info de si hubo texto para que la tool decida si pedir follow-up
+        await handleFunctionCall(pendingFunctionCall, { hadTextBeforeTool });
         return;
       }
 
@@ -825,9 +845,10 @@ app.ws("/realtime-ws", (clientWs) => {
     }
   }
 
-  async function handleFunctionCall(functionCall) {
+  async function handleFunctionCall(functionCall, { hadTextBeforeTool = false } = {}) {
     try {
       console.log("[TOOLS] Procesando function call:", JSON.stringify(functionCall, null, 2));
+      console.log("[TOOLS] hadTextBeforeTool:", hadTextBeforeTool);
       
       const name = functionCall.name;
       let args = {};
@@ -930,12 +951,24 @@ app.ws("/realtime-ws", (clientWs) => {
       }
 
       // Herramientas completamente silenciosas: no envían nada a Gemini ni generan follow-up
+      // PERO: si el modelo no emitió texto antes, debemos pedir que responda
       const silentToolsComplete = ["navegar_web"];
       // Herramientas silenciosas parciales: envían a Gemini pero no generan follow-up adicional
       const silentToolsNoFollowUp = ["abrir_modal_agendamiento"];
       
       if (silentToolsComplete.includes(name)) {
-        console.log(`[TOOLS] Herramienta completamente silenciosa "${name}" - no se envía respuesta a Gemini`);
+        if (hadTextBeforeTool) {
+          // El modelo ya dijo algo antes de la tool → silencio total OK
+          console.log(`[TOOLS] Herramienta silenciosa "${name}" - modelo ya habló, no se genera follow-up`);
+        } else {
+          // El modelo NO dijo nada → debemos pedir que responda
+          console.log(`[TOOLS] Herramienta silenciosa "${name}" - modelo NO habló, pidiendo respuesta`);
+          const wasSuccessful = result?.status === "success";
+          const followUpPrompt = wasSuccessful
+            ? `[SISTEMA: Acabas de navegar al usuario a la sección "${args?.seccion_tag || 'solicitada'}". Responde brevemente confirmando la navegación y/o explicando lo que puede ver allí.]`
+            : `[SISTEMA: Hubo un problema al navegar: ${result?.message || 'sección no encontrada'}. Discúlpate brevemente y ofrece alternativas.]`;
+          await getGeminiResponse(followUpPrompt);
+        }
       } else if (silentToolsNoFollowUp.includes(name)) {
         // Para herramientas silenciosas parciales, solo enviamos el resultado sin generar respuesta
         await sendFunctionResponseToGemini(name, result, { streamResponse: false });

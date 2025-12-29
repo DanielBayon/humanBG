@@ -601,6 +601,9 @@ app.ws("/realtime-ws", (clientWs) => {
   // Estados para deduplicación de herramientas
   const seenToolCalls = new Set();
   let isPausedForUserAction = false;
+  
+  // thought_signature para modelos con "thinking" (Gemini 2.5+)
+  let currentThoughtSignature = null;
 
   const sttIsActive = () =>
     recognizeStream && !recognizeStream.writableEnded && !recognizeStream.destroyed;
@@ -745,6 +748,7 @@ app.ws("/realtime-ws", (clientWs) => {
     let fullText = "";
     let toolAlreadyHandledThisTurn = false;
     let pendingFunctionCall = null;
+    let pendingThoughtSignature = null; // Para modelos con "thinking" (Gemini 2.5+)
 
     try {
       const modelInput = buildModelInputWithContext(userText || " ");
@@ -812,6 +816,18 @@ app.ws("/realtime-ws", (clientWs) => {
               pendingFunctionCall = part.functionCall;
               console.log("[GEMINI] Function call detectada (deferred):", JSON.stringify(pendingFunctionCall, null, 2));
             }
+            
+            // Capturar thought_signature para modelos con "thinking" (Gemini 2.5+)
+            // Esto es necesario para enviar el functionResponse correctamente
+            if (part && part.thought && part.thoughtSignature) {
+              pendingThoughtSignature = part.thoughtSignature;
+              console.log(`[GEMINI STREAM #${chunkIndex}] Part[${partIdx}] THOUGHT_SIGNATURE capturado`);
+            }
+            // También puede venir como propiedad directa del functionCall
+            if (part && part.functionCall && part.functionCall.thoughtSignature) {
+              pendingThoughtSignature = part.functionCall.thoughtSignature;
+              console.log(`[GEMINI STREAM #${chunkIndex}] Part[${partIdx}] THOUGHT_SIGNATURE en functionCall capturado`);
+            }
           }
         }
       }
@@ -832,10 +848,15 @@ app.ws("/realtime-ws", (clientWs) => {
           await commitAssistantFinal(fullText, { supervise: false, clearUserTurn: false });
           fullText = "";
         }
-        // Pasamos info de si hubo texto para que la tool decida si pedir follow-up
-        await handleFunctionCall(pendingFunctionCall, { hadTextBeforeTool });
+        // Guardar en variable global para uso en otros contextos
+        currentThoughtSignature = pendingThoughtSignature;
+        // Pasamos info de si hubo texto y el thoughtSignature para modelos con thinking
+        await handleFunctionCall(pendingFunctionCall, { hadTextBeforeTool, thoughtSignature: pendingThoughtSignature });
         return;
       }
+      
+      // Limpiar thought_signature si no hubo function call
+      currentThoughtSignature = null;
 
       // Fin del stream sin tools → cierre normal con supervisión
       await commitAssistantFinal(fullText, { supervise: true });
@@ -845,10 +866,11 @@ app.ws("/realtime-ws", (clientWs) => {
     }
   }
 
-  async function handleFunctionCall(functionCall, { hadTextBeforeTool = false } = {}) {
+  async function handleFunctionCall(functionCall, { hadTextBeforeTool = false, thoughtSignature = null } = {}) {
     try {
       console.log("[TOOLS] Procesando function call:", JSON.stringify(functionCall, null, 2));
       console.log("[TOOLS] hadTextBeforeTool:", hadTextBeforeTool);
+      console.log("[TOOLS] thoughtSignature:", thoughtSignature ? "(presente)" : "(no presente)");
       
       const name = functionCall.name;
       let args = {};
@@ -930,7 +952,7 @@ app.ws("/realtime-ws", (clientWs) => {
       if (!toolHandlers[name]) {
         const err = { status: "error", message: `La herramienta «${name}» no existe.` };
         console.error(`[TOOL ERROR] Herramienta inexistente: ${name}`);
-        await sendFunctionResponseToGemini(name, err);
+        await sendFunctionResponseToGemini(name, err, { thoughtSignature });
         safeSend(clientWs, { type: "tool_execution_end", toolName: name, success: false });
         await streamFollowUpAfterTool();
         return;
@@ -971,7 +993,7 @@ app.ws("/realtime-ws", (clientWs) => {
         }
       } else if (silentToolsNoFollowUp.includes(name)) {
         // Para herramientas silenciosas parciales, solo enviamos el resultado sin generar respuesta
-        await sendFunctionResponseToGemini(name, result, { streamResponse: false });
+        await sendFunctionResponseToGemini(name, result, { streamResponse: false, thoughtSignature });
         console.log(`[TOOLS] Herramienta silenciosa parcial "${name}" - resultado enviado sin follow-up`);
       } else {
         // Para ejecutar_orden_n8n y otras herramientas que necesitan confirmación:
@@ -1056,26 +1078,36 @@ Discúlpate brevemente por el error y ofrece ayuda.`;
     } catch (err) {
       console.error("[TOOL-FLOW ERROR]", err);
       safeSend(clientWs, { type: "tool_execution_end", toolName: functionCall?.name || "herramienta", success: false });
-      await sendFunctionResponseToGemini(functionCall?.name || "unknown_tool", { status: "error", message: err.message });
+      await sendFunctionResponseToGemini(functionCall?.name || "unknown_tool", { status: "error", message: err.message }, { thoughtSignature });
       await streamFollowUpAfterTool();
     } finally {
       // limpiar dedupe por turno
       seenToolCalls.clear();
+      // Limpiar thought_signature
+      currentThoughtSignature = null;
     }
   }
 
   async function sendFunctionResponseToGemini(name, payload, options = {}) {
-    const { streamResponse = false, confirmationPrompt = null } = options;
+    const { streamResponse = false, confirmationPrompt = null, thoughtSignature = null } = options;
     try {
       // Formato correcto para Vertex AI Gemini según documentación actual
-      const functionResponseParts = [{
-        functionResponse: {
+      const functionResponseObj = {
+        name: name,
+        response: {
           name: name,
-          response: {
-            name: name,
-            content: payload
-          }
+          content: payload
         }
+      };
+      
+      // Para modelos con "thinking" (Gemini 2.5+), incluir thought_signature si existe
+      if (thoughtSignature) {
+        functionResponseObj.thoughtSignature = thoughtSignature;
+        console.log(`[TOOLS] Incluyendo thought_signature en functionResponse para ${name}`);
+      }
+      
+      const functionResponseParts = [{
+        functionResponse: functionResponseObj
       }];
       
       // Si hay un prompt de confirmación, agregarlo como texto adicional

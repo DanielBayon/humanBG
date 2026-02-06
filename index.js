@@ -984,8 +984,13 @@ app.ws("/realtime-ws", (clientWs) => {
       if (dataTools.includes(name)) {
         const wasSuccessful = result?.status === "success";
         let instruction;
-        if (wasSuccessful) {
-          instruction = `[RESULTADO DE BÚSQUEDA DE PROPIEDADES]\n${result.result}\n\nPresenta estos resultados al usuario de forma natural y conversacional. Si no hay resultados, sugiere ampliar la búsqueda.`;
+        if (wasSuccessful && result.count > 0) {
+          const propsSummary = result.properties.map((p, i) =>
+            `${i+1}. ${p.type} en ${p.city} (${p.province}) - ${p.price.toLocaleString()}€ | ${p.bedrooms} hab, ${p.bathrooms} baños, ${p.surfaceBuilt || '?'}m² | ${p.description || ''}`
+          ).join('\n');
+          instruction = `[RESULTADO DE BÚSQUEDA DE PROPIEDADES - ${result.count} encontradas]\n${propsSummary}\n\nPresenta estos resultados al usuario de forma natural y conversacional. Menciona precio, ubicación, habitaciones y superficie. Si hay imágenes disponibles, no las menciones.`;
+        } else if (wasSuccessful && result.count === 0) {
+          instruction = `[BÚSQUEDA DE PROPIEDADES - 0 resultados]\nNo se encontraron propiedades con los filtros: ${JSON.stringify(result.filters)}\n\nInforma al usuario que no hay resultados y sugiere ampliar la búsqueda (mayor presupuesto, otra zona, menos filtros).`;
         } else {
           instruction = `[ERROR EN BÚSQUEDA DE PROPIEDADES: ${result?.message || 'No se pudieron buscar propiedades'}]\n\nDiscúlpate brevemente e invita al usuario a reformular su búsqueda.`;
         }

@@ -978,7 +978,33 @@ app.ws("/realtime-ws", (clientWs) => {
       // Herramientas silenciosas parciales: envían a Gemini pero no generan follow-up adicional
       const silentToolsNoFollowUp = ["abrir_modal_agendamiento"];
       
-      if (silentToolsComplete.includes(name)) {
+      // Herramientas de búsqueda: envían functionResponse a Gemini y hacen stream de su respuesta
+      const dataTools = ["search_properties"];
+
+      if (dataTools.includes(name)) {
+        // Enviar resultado a Gemini para que formule la respuesta al usuario
+        console.log(`[TOOLS] Herramienta de datos "${name}" - enviando resultado a Gemini para respuesta`);
+        try {
+          const streamResult = await sendFunctionResponseToGemini(name, result, { streamResponse: true, thoughtSignature });
+          let followText = "";
+          for await (const chunk of streamResult.stream) {
+            const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
+            for (const cand of candidates) {
+              if (!cand?.content?.parts) continue;
+              for (const part of cand.content.parts) {
+                if (part && typeof part.text === "string" && part.text.length > 0) {
+                  followText += part.text;
+                  safeSend(clientWs, { type: "assistant_delta", delta: part.text });
+                }
+              }
+            }
+          }
+          await commitAssistantFinal(followText, { supervise: true });
+        } catch (streamErr) {
+          console.error(`[TOOLS] Error en stream post-${name}:`, streamErr);
+          safeSend(clientWs, { type: "error", message: `Error procesando resultados: ${streamErr.message}` });
+        }
+      } else if (silentToolsComplete.includes(name)) {
         if (hadTextBeforeTool) {
           // El modelo ya dijo algo antes de la tool → silencio total OK
           console.log(`[TOOLS] Herramienta silenciosa "${name}" - modelo ya habló, no se genera follow-up`);
@@ -1453,6 +1479,49 @@ Discúlpate brevemente por el error y ofrece ayuda.`;
                 } catch (err) {
                   console.error("[TOOL navegar_web ERROR]", err);
                   return { status: "error", message: `Error en navegación web: ${err.message}` };
+                }
+              };
+            }
+
+            // Configurar herramienta de búsqueda de propiedades (Revirai Context API)
+            const reviraiUrl = botData.reviraiApiUrl || process.env.REVIRAI_API_URL || "";
+            if (reviraiUrl) {
+              console.log(`[CONFIG] Búsqueda de propiedades activada para bot ${currentBotId}: ${reviraiUrl}`);
+              currentTools.push({
+                type: "function",
+                name: "search_properties",
+                description: "Busca propiedades inmobiliarias en la base de datos. Usa esta herramienta cuando el usuario pregunte por propiedades, casas, pisos, apartamentos, precios o ubicaciones.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    query: {
+                      type: "string",
+                      description: "La consulta de búsqueda completa del usuario en lenguaje natural, incluyendo ubicación, precio y características."
+                    }
+                  },
+                  required: ["query"]
+                }
+              });
+
+              toolHandlers.search_properties = async ({ query }) => {
+                try {
+                  console.log(`[TOOL search_properties] Buscando: "${query}" en ${reviraiUrl}`);
+                  const apiUrl = reviraiUrl.replace(/\/+$/, "") + "/api/chat";
+                  const resp = await fetch(apiUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ message: query, channel: "web" }),
+                    timeout: 25000,
+                  });
+                  if (!resp.ok) {
+                    throw new Error(`API respondió ${resp.status}`);
+                  }
+                  const data = await resp.json();
+                  console.log(`[TOOL search_properties] Resultado obtenido (${(data.reply || "").length} chars)`);
+                  return { status: "success", result: data.reply };
+                } catch (err) {
+                  console.error("[TOOL search_properties ERROR]", err);
+                  return { status: "error", message: `Error buscando propiedades: ${err.message}` };
                 }
               };
             }

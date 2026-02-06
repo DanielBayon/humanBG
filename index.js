@@ -985,10 +985,20 @@ app.ws("/realtime-ws", (clientWs) => {
         const wasSuccessful = result?.status === "success";
         let instruction;
         if (wasSuccessful && result.count > 0) {
-          const propsSummary = result.properties.map((p, i) =>
-            `${i+1}. ${p.type} en ${p.city} (${p.province}) - ${p.price.toLocaleString()}€ | ${p.bedrooms} hab, ${p.bathrooms} baños, ${p.surfaceBuilt || '?'}m² | ${p.description || ''}`
-          ).join('\n');
-          instruction = `[RESULTADO DE BÚSQUEDA DE PROPIEDADES - ${result.count} encontradas]\n${propsSummary}\n\nPresenta estos resultados al usuario de forma natural y conversacional. Menciona precio, ubicación, habitaciones y superficie. Si hay imágenes disponibles, no las menciones.`;
+          const propsSummary = result.properties.map((p, i) => {
+            const parts = [`${i+1}. **${p.type}** en ${p.city} (${p.province})`];
+            parts.push(`   Precio: ${p.price ? p.price.toLocaleString() + '€' : 'Consultar'} (${p.priceFreq || 'venta'})`);
+            parts.push(`   ${p.bedrooms || 0} habitaciones, ${p.bathrooms || 0} baños`);
+            if (p.surfaceBuilt) parts.push(`   Superficie construida: ${p.surfaceBuilt}m²`);
+            if (p.surfacePlot) parts.push(`   Parcela: ${p.surfacePlot}m²`);
+            if (p.pool) parts.push(`   Piscina: Sí`);
+            if (p.newBuild) parts.push(`   Obra nueva: Sí`);
+            if (p.ref) parts.push(`   Ref: ${p.ref}`);
+            if (p.description) parts.push(`   Descripción: ${p.description.substring(0, 500)}`);
+            if (p.features && p.features.length > 0) parts.push(`   Características: ${p.features.join(', ')}`);
+            return parts.join('\n');
+          }).join('\n\n');
+          instruction = `[RESULTADO DE BÚSQUEDA DE PROPIEDADES - ${result.count} encontradas]\n\n${propsSummary}\n\nPresenta estos resultados al usuario de forma natural y conversacional. Menciona los datos más relevantes: precio, ubicación, habitaciones, superficie y características destacadas. Si la propiedad tiene descripción interesante, comparte los detalles más útiles. No menciones imágenes ni URLs.`;
         } else if (wasSuccessful && result.count === 0) {
           instruction = `[BÚSQUEDA DE PROPIEDADES - 0 resultados]\nNo se encontraron propiedades con los filtros: ${JSON.stringify(result.filters)}\n\nInforma al usuario que no hay resultados y sugiere ampliar la búsqueda (mayor presupuesto, otra zona, menos filtros).`;
         } else {

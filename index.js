@@ -978,32 +978,19 @@ app.ws("/realtime-ws", (clientWs) => {
       // Herramientas silenciosas parciales: envían a Gemini pero no generan follow-up adicional
       const silentToolsNoFollowUp = ["abrir_modal_agendamiento"];
       
-      // Herramientas de búsqueda: envían functionResponse a Gemini y hacen stream de su respuesta
+      // Herramientas de búsqueda: envían resultado como prompt a Gemini para que responda
       const dataTools = ["search_properties"];
 
       if (dataTools.includes(name)) {
-        // Enviar resultado a Gemini para que formule la respuesta al usuario
-        console.log(`[TOOLS] Herramienta de datos "${name}" - enviando resultado a Gemini para respuesta`);
-        try {
-          const streamResult = await sendFunctionResponseToGemini(name, result, { streamResponse: true, thoughtSignature });
-          let followText = "";
-          for await (const chunk of streamResult.stream) {
-            const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
-            for (const cand of candidates) {
-              if (!cand?.content?.parts) continue;
-              for (const part of cand.content.parts) {
-                if (part && typeof part.text === "string" && part.text.length > 0) {
-                  followText += part.text;
-                  safeSend(clientWs, { type: "assistant_delta", delta: part.text });
-                }
-              }
-            }
-          }
-          await commitAssistantFinal(followText, { supervise: true });
-        } catch (streamErr) {
-          console.error(`[TOOLS] Error en stream post-${name}:`, streamErr);
-          safeSend(clientWs, { type: "error", message: `Error procesando resultados: ${streamErr.message}` });
+        const wasSuccessful = result?.status === "success";
+        let instruction;
+        if (wasSuccessful) {
+          instruction = `[RESULTADO DE BÚSQUEDA DE PROPIEDADES]\n${result.result}\n\nPresenta estos resultados al usuario de forma natural y conversacional. Si no hay resultados, sugiere ampliar la búsqueda.`;
+        } else {
+          instruction = `[ERROR EN BÚSQUEDA DE PROPIEDADES: ${result?.message || 'No se pudieron buscar propiedades'}]\n\nDiscúlpate brevemente e invita al usuario a reformular su búsqueda.`;
         }
+        console.log(`[TOOLS] Herramienta de datos "${name}" - enviando resultado a Gemini via prompt`);
+        await getGeminiResponse(instruction);
       } else if (silentToolsComplete.includes(name)) {
         if (hadTextBeforeTool) {
           // El modelo ya dijo algo antes de la tool → silencio total OK
@@ -1484,7 +1471,7 @@ Discúlpate brevemente por el error y ofrece ayuda.`;
             }
 
             // Configurar herramienta de búsqueda de propiedades (Revirai Context API)
-            const reviraiUrl = botData.reviraiApiUrl || process.env.REVIRAI_API_URL || "";
+            const reviraiUrl = (botData.reviraiApiUrl || process.env.REVIRAI_API_URL || "").trim();
             if (reviraiUrl) {
               console.log(`[CONFIG] Búsqueda de propiedades activada para bot ${currentBotId}: ${reviraiUrl}`);
               currentTools.push({

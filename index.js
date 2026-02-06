@@ -1477,56 +1477,34 @@ Discúlpate brevemente por el error y ofrece ayuda.`;
               currentTools.push({
                 type: "function",
                 name: "search_properties",
-                description: "Busca propiedades inmobiliarias en la base de datos. Usa esta herramienta cuando el usuario pregunte por propiedades, casas, pisos, apartamentos, precios o ubicaciones. Devuelve datos JSON de las propiedades encontradas.",
+                description: "Busca propiedades inmobiliarias en la base de datos. Usa esta herramienta cuando el usuario pregunte por propiedades, casas, pisos, apartamentos, precios o ubicaciones. Pasa la petición completa del usuario tal cual en lenguaje natural.",
                 parameters: {
                   type: "object",
                   properties: {
-                    location: {
+                    query: {
                       type: "string",
-                      description: "Ciudad o provincia donde buscar (ej: 'Toledo', 'Madrid')"
-                    },
-                    maxPrice: {
-                      type: "number",
-                      description: "Precio máximo en EUR"
-                    },
-                    minPrice: {
-                      type: "number",
-                      description: "Precio mínimo en EUR"
-                    },
-                    minBedrooms: {
-                      type: "number",
-                      description: "Número mínimo de habitaciones"
-                    },
-                    type: {
-                      type: "string",
-                      description: "Tipo de propiedad (ej: 'casa', 'piso', 'apartamento', 'villa', 'garaje')"
+                      description: "La petición completa del usuario en lenguaje natural, incluyendo ubicación, precio, habitaciones, tipo y cualquier otro detalle mencionado. Ejemplo: 'busco una casa en Toledo con 3 habitaciones por menos de 200000 euros'"
                     }
-                  }
+                  },
+                  required: ["query"]
                 }
               });
 
-              toolHandlers.search_properties = async (args) => {
+              toolHandlers.search_properties = async ({ query }) => {
                 try {
-                  console.log(`[TOOL search_properties] Params:`, JSON.stringify(args));
+                  console.log(`[TOOL search_properties] Query: "${query}"`);
                   const apiUrl = reviraiUrl.replace(/\/+$/, "") + "/api/search";
                   const resp = await fetch(apiUrl, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      location: args.location,
-                      maxPrice: args.maxPrice,
-                      minPrice: args.minPrice,
-                      minBedrooms: args.minBedrooms,
-                      type: args.type,
-                      limit: 10,
-                    }),
-                    timeout: 15000,
+                    body: JSON.stringify({ query }),
+                    timeout: 25000,
                   });
                   if (!resp.ok) {
                     throw new Error(`API respondió ${resp.status}`);
                   }
                   const data = await resp.json();
-                  console.log(`[TOOL search_properties] ${data.count} propiedades encontradas`);
+                  console.log(`[TOOL search_properties] ${data.count} propiedades encontradas (filtros: ${JSON.stringify(data.filters)})`);
                   return { status: "success", ...data };
                 } catch (err) {
                   console.error("[TOOL search_properties ERROR]", err);

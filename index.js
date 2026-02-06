@@ -1492,7 +1492,7 @@ Discúlpate brevemente por el error y ofrece ayuda.`;
               currentTools.push({
                 type: "function",
                 name: "search_properties",
-                description: "Busca propiedades inmobiliarias en la base de datos. Usa esta herramienta cuando el usuario pregunte por propiedades, casas, pisos, apartamentos, precios o ubicaciones. Pasa la petición completa del usuario tal cual en lenguaje natural.",
+                description: "Busca propiedades inmobiliarias en la base de datos. Usa esta herramienta cuando el usuario pregunte por propiedades, casas, pisos, apartamentos, precios o ubicaciones. Pasa la petición completa del usuario tal cual en lenguaje natural. IMPORTANTE: SIEMPRE antes de llamar a esta herramienta, dile al usuario que vas a buscar en la base de datos repitiendo brevemente los criterios de búsqueda (por ejemplo: 'Perfecto, voy a buscar viviendas en Toledo con 3 habitaciones por menos de 200.000 euros, dame un momento...'). Esto es obligatorio para que el usuario sepa que estás trabajando en su petición.",
                 parameters: {
                   type: "object",
                   properties: {
